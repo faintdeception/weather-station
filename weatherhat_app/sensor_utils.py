@@ -113,7 +113,11 @@ def accumulate_rainfall(readings, accumulated_rain=0, last_reset_time=None):
     
     # Add the new rain measurements to the accumulation
     # Rain values are typically reported as incremental amounts since last reading
-    new_rain = sum(r["rain"] for r in readings)
+    # The Weather HAT rain gauge outputs in mm but with a multiplier of ~0.2794mm per tip
+    # Calibration factor for Weather HAT rain gauge (adjust based on actual calibration)
+    RAIN_CALIBRATION_FACTOR = 0.2794  # mm per count
+    
+    new_rain = sum(r["rain"] for r in readings) * RAIN_CALIBRATION_FACTOR
     accumulated_rain += new_rain
     
     return accumulated_rain, last_reset_time
