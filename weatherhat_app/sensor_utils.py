@@ -6,7 +6,7 @@ import sys
 import time
 import math
 from weatherhat import WeatherHAT
-OFFSET = -4.1  # Offset for temperature calibration
+OFFSET = -12.3  # Offset for temperature calibration
 def initialize_sensor():
     """Initialize the WeatherHAT sensor"""
     try:
