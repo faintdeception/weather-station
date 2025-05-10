@@ -12,7 +12,8 @@ import traceback
 
 from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, accumulate_rainfall, cleanup_sensor
 from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurement, store_measurement, 
-                                           update_records, calculate_trends, setup_retention_policies, setup_indexes)
+                                           update_records, calculate_trends, setup_retention_policies, setup_indexes,
+                                           DateTimeEncoder)
 from weatherhat_app.reporting import generate_daily_report
 from weatherhat_app.scheduler import MaintenanceScheduler
 
@@ -108,7 +109,7 @@ def run():
         store_measurement(db, measurement)
         
         # Output the measurement as JSON
-        print(json.dumps(measurement))
+        print(json.dumps(measurement, cls=DateTimeEncoder))
         return 0
 
     except Exception as e:

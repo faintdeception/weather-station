@@ -10,6 +10,14 @@ import math
 from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
+# Custom JSON encoder to handle datetime objects
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            # Convert datetime to string
+            return obj.isoformat()
+        return super().default(obj)
+
 def connect_to_mongodb(mongo_uri, max_retries=5, retry_interval=5):
     """Connect to MongoDB with retry logic"""
     retry_count = 0
