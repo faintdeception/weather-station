@@ -80,6 +80,44 @@ def calculate_average_readings(readings):
     
     return avg_fields
 
+def accumulate_rainfall(readings, accumulated_rain=0, last_reset_time=None):
+    """
+    Track accumulated rainfall over time and reset every 24 hours.
+    
+    Args:
+        readings: List of reading dictionaries containing rain measurements
+        accumulated_rain: Current accumulated rainfall value (default: 0)
+        last_reset_time: Time of the last rain accumulation reset (default: None, will be set to current time)
+    
+    Returns:
+        tuple: (updated accumulated rain, updated last reset time)
+    """
+    if not readings:
+        return accumulated_rain, last_reset_time
+    
+    current_time = time.time()
+    
+    # Initialize last_reset_time if it's None
+    if last_reset_time is None:
+        last_reset_time = current_time
+    
+    # Check if 24 hours have passed since the last reset
+    time_diff = current_time - last_reset_time
+    hours_24 = 24 * 60 * 60  # 24 hours in seconds
+    
+    if time_diff >= hours_24:
+        # Reset the accumulation after 24 hours
+        accumulated_rain = 0
+        last_reset_time = current_time
+        print(f"Resetting rain accumulation after 24-hour period", file=sys.stderr)
+    
+    # Add the new rain measurements to the accumulation
+    # Rain values are typically reported as incremental amounts since last reading
+    new_rain = sum(r["rain"] for r in readings)
+    accumulated_rain += new_rain
+    
+    return accumulated_rain, last_reset_time
+
 def cleanup_sensor(sensor):
     """Clean up the sensor resources"""
     if sensor:

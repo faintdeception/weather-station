@@ -10,7 +10,7 @@ import json
 import time
 import traceback
 
-from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, cleanup_sensor
+from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, accumulate_rainfall, cleanup_sensor
 from weatherhat_app.data_processing import connect_to_mongodb, prepare_measurement, store_measurement, update_records, calculate_trends
 from weatherhat_app.reporting import generate_daily_report
 
@@ -21,8 +21,14 @@ DB_NAME = os.environ.get('MONGO_DB', 'weather_data')
 # Add a delay at startup to allow MongoDB to initialize if starting together
 STARTUP_DELAY = int(os.environ.get('STARTUP_DELAY', '0'))
 
+# Global variables for rain accumulation
+ACCUMULATED_RAIN = 0
+LAST_RAIN_RESET = None
+
 def run():
     """Main function to run the WeatherHAT application"""
+    global ACCUMULATED_RAIN, LAST_RAIN_RESET
+    
     sensor = None
     mongo_client = None
     
@@ -36,6 +42,16 @@ def run():
         mongo_client = connect_to_mongodb(MONGO_URI)
         db = mongo_client[DB_NAME]
         
+        # Try to load the last accumulated rain value and reset time from the database
+        try:
+            rain_state = db['rain_state'].find_one({'_id': 'rain_accumulation'})
+            if rain_state:
+                ACCUMULATED_RAIN = rain_state.get('accumulated_rain', 0)
+                LAST_RAIN_RESET = rain_state.get('last_reset_time')
+                print(f"Loaded rain state: accumulated={ACCUMULATED_RAIN}, last reset={LAST_RAIN_RESET}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error loading rain state (using defaults): {e}", file=sys.stderr)
+        
         # Generate daily report if needed
         generate_daily_report(db)
         
@@ -45,8 +61,24 @@ def run():
         # Take readings (discards first reading, takes 3 valid readings)
         readings = take_readings(sensor, num_readings=3, discard_first=True)
         
-        # Calculate average values
+        # Calculate average values for most measurements
         avg_fields = calculate_average_readings(readings)
+        
+        # Handle rain accumulation separately (don't average it)
+        ACCUMULATED_RAIN, LAST_RAIN_RESET = accumulate_rainfall(readings, ACCUMULATED_RAIN, LAST_RAIN_RESET)
+        
+        # Replace the averaged rain value with the accumulated value
+        avg_fields['rain'] = ACCUMULATED_RAIN
+        
+        # Store the updated rain state
+        db['rain_state'].update_one(
+            {'_id': 'rain_accumulation'}, 
+            {'$set': {
+                'accumulated_rain': ACCUMULATED_RAIN,
+                'last_reset_time': LAST_RAIN_RESET
+            }}, 
+            upsert=True
+        )
         
         # Add cardinal wind direction
         if "wind_direction" in avg_fields:
