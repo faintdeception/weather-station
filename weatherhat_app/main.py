@@ -11,8 +11,10 @@ import time
 import traceback
 
 from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, accumulate_rainfall, cleanup_sensor
-from weatherhat_app.data_processing import connect_to_mongodb, prepare_measurement, store_measurement, update_records, calculate_trends
+from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurement, store_measurement, 
+                                           update_records, calculate_trends, setup_retention_policies, setup_indexes)
 from weatherhat_app.reporting import generate_daily_report
+from weatherhat_app.scheduler import MaintenanceScheduler
 
 # MongoDB connection settings
 MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://akuma:27017')
@@ -31,6 +33,7 @@ def run():
     
     sensor = None
     mongo_client = None
+    scheduler = None
     
     try:
         # Apply startup delay if configured
@@ -41,6 +44,14 @@ def run():
         # Connect to MongoDB
         mongo_client = connect_to_mongodb(MONGO_URI)
         db = mongo_client[DB_NAME]
+        
+        # Set up data retention policies and performance indexes
+        setup_retention_policies(db)
+        setup_indexes(db)
+        
+        # Start the maintenance scheduler
+        scheduler = MaintenanceScheduler(db)
+        scheduler.start()
         
         # Try to load the last accumulated rain value and reset time from the database
         try:
@@ -107,6 +118,9 @@ def run():
 
     finally:
         # Clean up resources
+        if scheduler:
+            scheduler.stop()
+            
         if mongo_client:
             mongo_client.close()
         

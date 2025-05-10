@@ -8,7 +8,7 @@ import traceback
 import json
 import math
 from datetime import datetime, timedelta
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING, DESCENDING
 
 def connect_to_mongodb(mongo_uri, max_retries=5, retry_interval=5):
     """Connect to MongoDB with retry logic"""
@@ -37,9 +37,13 @@ def prepare_measurement(avg_fields, sensor, location="backyard", sensor_type="we
     if "wind_direction_cardinal" not in avg_fields and "wind_direction" in avg_fields:
         avg_fields["wind_direction_cardinal"] = sensor.degrees_to_cardinal(avg_fields["wind_direction"])
     
+    # Get current timestamp in nanoseconds
+    timestamp_ns = int(datetime.now(datetime.UTC).timestamp() * 1e9)
+    
     # Prepare measurement data
     measurement = {
-        "timestamp": int(datetime.now(datetime.UTC).timestamp() * 1e9),  # Nanoseconds UTC timestamp for InfluxDB compatibility
+        "timestamp": timestamp_ns,  # Nanoseconds UTC timestamp for InfluxDB compatibility
+        "timestamp_ms": datetime.fromtimestamp(timestamp_ns/1e9, datetime.UTC),  # MongoDB date for TTL
         "fields": avg_fields,
         "tags": {
             "location": location,
@@ -205,3 +209,271 @@ def calculate_trends(db, measurement):
         print(f"Error in calculate_trends: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return None
+
+def setup_retention_policies(db):
+    """Set up TTL indexes for automatic data expiration"""
+    try:
+        # Keep detailed measurements for 90 days (7776000 seconds)
+        db.measurements.create_index(
+            [("timestamp_ms", 1)], 
+            expireAfterSeconds=7776000,  # 90 days
+            background=True
+        )
+        
+        # Keep trend data for 180 days
+        db.trends.create_index(
+            [("timestamp_ms", 1)],
+            expireAfterSeconds=15552000,  # 180 days
+            background=True
+        )
+        
+        print("Set up data retention policies", file=sys.stderr)
+    except Exception as e:
+        print(f"Error setting up retention policies: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+
+def setup_indexes(db):
+    """Set up indexes for improved query performance"""
+    try:
+        # Index for faster location-based queries
+        db.measurements.create_index([("tags.location", 1), ("timestamp", -1)])
+        db.hourly_measurements.create_index([("tags.location", 1), ("timestamp", -1)])
+        db.daily_measurements.create_index([("tags.location", 1), ("timestamp", -1)])
+        
+        # Index for trend calculations
+        db.measurements.create_index([("timestamp", 1), ("tags.location", 1)])
+        
+        print("Set up performance indexes", file=sys.stderr)
+    except Exception as e:
+        print(f"Error setting up indexes: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+
+def downsample_hourly(db):
+    """Aggregate measurement data to hourly records"""
+    try:
+        # Get the current time and one hour ago
+        now = datetime.now(datetime.UTC)
+        one_hour_ago = now - timedelta(hours=1)
+        
+        # Convert to nanosecond timestamps
+        now_ns = int(now.timestamp() * 1e9)
+        one_hour_ago_ns = int(one_hour_ago.timestamp() * 1e9)
+        
+        # Get the hour timestamp (rounded to the hour)
+        hour_start = datetime(one_hour_ago.year, one_hour_ago.month, one_hour_ago.day, 
+                             one_hour_ago.hour, 0, 0, tzinfo=datetime.UTC)
+        hour_timestamp = int(hour_start.timestamp() * 1e9)
+        
+        # Check if we already have an hourly record for this hour
+        existing = db.hourly_measurements.find_one({
+            "hour_timestamp": hour_timestamp,
+            "tags.location": {"$exists": True}
+        })
+        
+        if existing:
+            print(f"Hourly record for {hour_start} already exists", file=sys.stderr)
+            return None
+            
+        # Find measurements in the hour that need to be aggregated
+        pipeline = [
+            {
+                "$match": {
+                    "timestamp": {"$gte": one_hour_ago_ns, "$lt": now_ns},
+                    "tags.location": {"$exists": True}
+                }
+            },
+            {
+                "$group": {
+                    "_id": {
+                        "hour": {"$dateTrunc": {"date": "$timestamp_ms", "unit": "hour"}},
+                        "location": "$tags.location",
+                        "sensor_type": "$tags.sensor_type"
+                    },
+                    "avg_temperature": {"$avg": "$fields.temperature"},
+                    "min_temperature": {"$min": "$fields.temperature"},
+                    "max_temperature": {"$max": "$fields.temperature"},
+                    "avg_humidity": {"$avg": "$fields.humidity"},
+                    "avg_pressure": {"$avg": "$fields.pressure"},
+                    "avg_wind_speed": {"$avg": "$fields.wind_speed"},
+                    "max_wind_speed": {"$max": "$fields.wind_speed"},
+                    "avg_lux": {"$avg": "$fields.lux"},
+                    "count": {"$sum": 1}
+                }
+            }
+        ]
+        
+        results = list(db.measurements.aggregate(pipeline))
+        
+        # Store hourly records
+        for result in results:
+            if result["count"] < 5:  # Require minimum number of readings
+                continue
+                
+            hourly_data = {
+                "timestamp": hour_timestamp,
+                "timestamp_ms": hour_start,
+                "hour_timestamp": hour_timestamp,  # For easy querying
+                "fields": {
+                    "temperature": {
+                        "avg": result["avg_temperature"],
+                        "min": result["min_temperature"],
+                        "max": result["max_temperature"]
+                    },
+                    "humidity": {"avg": result["avg_humidity"]},
+                    "pressure": {"avg": result["avg_pressure"]},
+                    "wind_speed": {
+                        "avg": result["avg_wind_speed"],
+                        "max": result["max_wind_speed"]
+                    },
+                    "lux": {"avg": result["avg_lux"]},
+                    "sample_count": result["count"]
+                },
+                "tags": {
+                    "location": result["_id"]["location"],
+                    "sensor_type": result["_id"]["sensor_type"]
+                }
+            }
+            
+            db.hourly_measurements.insert_one(hourly_data)
+            print(f"Created hourly record for {hour_start}", file=sys.stderr)
+            
+        return len(results)
+    except Exception as e:
+        print(f"Error in downsample_hourly: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+def downsample_daily(db):
+    """Aggregate hourly data to daily records"""
+    try:
+        # Get the current time and yesterday
+        now = datetime.now(datetime.UTC)
+        yesterday = now - timedelta(days=1)
+        
+        # Get the day timestamp (rounded to the day)
+        day_start = datetime(yesterday.year, yesterday.month, yesterday.day, 
+                            0, 0, 0, tzinfo=datetime.UTC)
+        day_timestamp = int(day_start.timestamp() * 1e9)
+        
+        # Check if we already have a daily record for this day
+        existing = db.daily_measurements.find_one({
+            "day_timestamp": day_timestamp,
+            "tags.location": {"$exists": True}
+        })
+        
+        if existing:
+            print(f"Daily record for {day_start.date()} already exists", file=sys.stderr)
+            return None
+            
+        # Find hourly records for the day
+        pipeline = [
+            {
+                "$match": {
+                    "timestamp_ms": {
+                        "$gte": day_start,
+                        "$lt": day_start + timedelta(days=1)
+                    }
+                }
+            },
+            {
+                "$group": {
+                    "_id": {
+                        "day": {"$dateTrunc": {"date": "$timestamp_ms", "unit": "day"}},
+                        "location": "$tags.location",
+                        "sensor_type": "$tags.sensor_type"
+                    },
+                    "avg_temperature": {"$avg": "$fields.temperature.avg"},
+                    "min_temperature": {"$min": "$fields.temperature.min"},
+                    "max_temperature": {"$max": "$fields.temperature.max"},
+                    "avg_humidity": {"$avg": "$fields.humidity.avg"},
+                    "avg_pressure": {"$avg": "$fields.pressure.avg"},
+                    "avg_wind_speed": {"$avg": "$fields.wind_speed.avg"},
+                    "max_wind_speed": {"$max": "$fields.wind_speed.max"},
+                    "avg_lux": {"$avg": "$fields.lux.avg"},
+                    "hour_count": {"$sum": 1}
+                }
+            }
+        ]
+        
+        results = list(db.hourly_measurements.aggregate(pipeline))
+        
+        # Store daily records
+        for result in results:
+            if result["hour_count"] < 12:  # Require at least 12 hours of data
+                continue
+                
+            daily_data = {
+                "timestamp": day_timestamp,
+                "timestamp_ms": day_start,
+                "day_timestamp": day_timestamp,  # For easy querying
+                "date": day_start.strftime("%Y-%m-%d"),
+                "fields": {
+                    "temperature": {
+                        "avg": result["avg_temperature"],
+                        "min": result["min_temperature"],
+                        "max": result["max_temperature"]
+                    },
+                    "humidity": {"avg": result["avg_humidity"]},
+                    "pressure": {"avg": result["avg_pressure"]},
+                    "wind_speed": {
+                        "avg": result["avg_wind_speed"],
+                        "max": result["max_wind_speed"]
+                    },
+                    "lux": {"avg": result["avg_lux"]},
+                    "hour_count": result["hour_count"]
+                },
+                "tags": {
+                    "location": result["_id"]["location"],
+                    "sensor_type": result["_id"]["sensor_type"]
+                }
+            }
+            
+            db.daily_measurements.insert_one(daily_data)
+            print(f"Created daily record for {day_start.date()}", file=sys.stderr)
+            
+        return len(results)
+    except Exception as e:
+        print(f"Error in downsample_daily: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+def get_collection_sizes(db):
+    """Get the size of each collection in the database"""
+    try:
+        stats = {}
+        for collection_name in db.list_collection_names():
+            stats[collection_name] = db.command("collStats", collection_name)["size"] / (1024 * 1024)  # MB
+        return stats
+    except Exception as e:
+        print(f"Error getting collection sizes: {e}", file=sys.stderr)
+        return {}
+
+def perform_database_maintenance(db):
+    """Run all database maintenance tasks"""
+    try:
+        print("Starting database maintenance...", file=sys.stderr)
+        
+        # Downsample hourly data
+        hourly_result = downsample_hourly(db)
+        print(f"Hourly downsampling complete: {hourly_result} records created", file=sys.stderr)
+        
+        # Downsample daily data
+        daily_result = downsample_daily(db)
+        print(f"Daily downsampling complete: {daily_result} records created", file=sys.stderr)
+        
+        # Verify TTL indexes are working
+        measurements_index = db.measurements.index_information()
+        if "timestamp_ms_1" not in measurements_index:
+            print("WARNING: TTL index on measurements collection is missing!", file=sys.stderr)
+            setup_retention_policies(db)
+        
+        # Report collection sizes
+        sizes = get_collection_sizes(db)
+        print("Current database collection sizes (MB):", file=sys.stderr)
+        for collection, size in sizes.items():
+            print(f"  {collection}: {size:.2f} MB", file=sys.stderr)
+        
+        print("Database maintenance complete", file=sys.stderr)
+    except Exception as e:
+        print(f"Error in perform_database_maintenance: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
