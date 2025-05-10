@@ -7,7 +7,7 @@ import sys
 import traceback
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from pymongo import MongoClient
 
 def connect_to_mongodb(mongo_uri, max_retries=5, retry_interval=5):
@@ -135,11 +135,11 @@ def calculate_trends(db, measurement):
         
         # Time ranges for trend calculations
         time_ranges = {
-            'hour_1': current_time - datetime.timedelta(hours=1),
-            'hour_3': current_time - datetime.timedelta(hours=3),
-            'hour_6': current_time - datetime.timedelta(hours=6),
-            'hour_12': current_time - datetime.timedelta(hours=12),
-            'hour_24': current_time - datetime.timedelta(hours=24),
+            'hour_1': current_time - timedelta(hours=1),
+            'hour_3': current_time - timedelta(hours=3),
+            'hour_6': current_time - timedelta(hours=6),
+            'hour_12': current_time - timedelta(hours=12),
+            'hour_24': current_time - timedelta(hours=24),
         }
         
         # Parameters to analyze
