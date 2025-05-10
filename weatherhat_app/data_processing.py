@@ -7,7 +7,7 @@ import sys
 import traceback
 import json
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
 def connect_to_mongodb(mongo_uri, max_retries=5, retry_interval=5):
@@ -38,12 +38,12 @@ def prepare_measurement(avg_fields, sensor, location="backyard", sensor_type="we
         avg_fields["wind_direction_cardinal"] = sensor.degrees_to_cardinal(avg_fields["wind_direction"])
     
     # Get current timestamp in nanoseconds
-    timestamp_ns = int(datetime.now(datetime.UTC).timestamp() * 1e9)
+    timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
     
     # Prepare measurement data
     measurement = {
         "timestamp": timestamp_ns,  # Nanoseconds UTC timestamp for InfluxDB compatibility
-        "timestamp_ms": datetime.fromtimestamp(timestamp_ns/1e9, datetime.UTC),  # MongoDB date for TTL
+        "timestamp_ms": datetime.fromtimestamp(timestamp_ns/1e9, timezone.utc),  # MongoDB date for TTL
         "fields": avg_fields,
         "tags": {
             "location": location,
@@ -252,7 +252,7 @@ def downsample_hourly(db):
     """Aggregate measurement data to hourly records"""
     try:
         # Get the current time and one hour ago
-        now = datetime.now(datetime.UTC)
+        now = datetime.now(timezone.utc)
         one_hour_ago = now - timedelta(hours=1)
         
         # Convert to nanosecond timestamps
@@ -261,7 +261,7 @@ def downsample_hourly(db):
         
         # Get the hour timestamp (rounded to the hour)
         hour_start = datetime(one_hour_ago.year, one_hour_ago.month, one_hour_ago.day, 
-                             one_hour_ago.hour, 0, 0, tzinfo=datetime.UTC)
+                             one_hour_ago.hour, 0, 0, tzinfo=timezone.utc)
         hour_timestamp = int(hour_start.timestamp() * 1e9)
         
         # Check if we already have an hourly record for this hour
@@ -347,12 +347,12 @@ def downsample_daily(db):
     """Aggregate hourly data to daily records"""
     try:
         # Get the current time and yesterday
-        now = datetime.now(datetime.UTC)
+        now = datetime.now(timezone.utc)
         yesterday = now - timedelta(days=1)
         
         # Get the day timestamp (rounded to the day)
         day_start = datetime(yesterday.year, yesterday.month, yesterday.day, 
-                            0, 0, 0, tzinfo=datetime.UTC)
+                            0, 0, 0, tzinfo=timezone.utc)
         day_timestamp = int(day_start.timestamp() * 1e9)
         
         # Check if we already have a daily record for this day

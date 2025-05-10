@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import argparse
+from datetime import datetime, timezone
 
 from weatherhat_app.data_processing import (
     connect_to_mongodb, 

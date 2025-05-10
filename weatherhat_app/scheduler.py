@@ -6,7 +6,7 @@ import time
 import sys
 import threading
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from weatherhat_app.data_processing import perform_database_maintenance, downsample_hourly
 
