@@ -39,7 +39,7 @@ def prepare_measurement(avg_fields, sensor, location="backyard", sensor_type="we
     
     # Prepare measurement data
     measurement = {
-        "timestamp": int(time.time() * 1e9),  # Nanoseconds timestamp for InfluxDB compatibility
+        "timestamp": int(datetime.now(datetime.UTC).timestamp() * 1e9),  # Nanoseconds UTC timestamp for InfluxDB compatibility
         "fields": avg_fields,
         "tags": {
             "location": location,
