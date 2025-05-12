@@ -12,10 +12,30 @@ import sys
 import time
 import argparse
 from datetime import datetime, timezone
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file manually
+def load_env_vars():
+    try:
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+        if os.path.exists(env_path):
+            print(f"Loading environment from {env_path}", file=sys.stderr)
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    key, value = line.split('=', 1)
+                    os.environ[key.strip()] = value.strip()
+            return True
+        else:
+            print(f"No .env file found at {env_path}", file=sys.stderr)
+            return False
+    except Exception as e:
+        print(f"Error loading .env file: {e}", file=sys.stderr)
+        return False
+
+# Try to load from .env file
+load_env_vars()
 
 from weatherhat_app.data_processing import (
     connect_to_mongodb, 
