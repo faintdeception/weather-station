@@ -12,6 +12,10 @@ import sys
 import time
 import argparse
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from weatherhat_app.data_processing import (
     connect_to_mongodb, 

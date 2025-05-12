@@ -9,6 +9,10 @@ import sys
 import json
 import time
 import traceback
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, accumulate_rainfall, cleanup_sensor
 from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurement, store_measurement, 
