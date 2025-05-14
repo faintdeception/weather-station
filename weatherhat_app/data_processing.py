@@ -11,13 +11,17 @@ import os
 import pickle
 from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient, ASCENDING, DESCENDING, UpdateOne, InsertOne
+from bson.objectid import ObjectId
 
-# Custom JSON encoder to handle datetime objects
+# Custom JSON encoder to handle datetime objects and MongoDB ObjectIds
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, datetime):
             # Convert datetime to string
             return obj.isoformat()
+        elif isinstance(obj, ObjectId):
+            # Convert ObjectId to string
+            return str(obj)
         return super().default(obj)
 
 class MeasurementBuffer:
@@ -328,7 +332,7 @@ def setup_retention_policies(db):
         # Keep raw measurements for 30 days (much lower than before to save space)
         db.measurements.create_index(
             [("timestamp_ms", 1)], 
-            expireAfterSeconds=2592000,  # 30 days (was 90)
+            expireAfterSeconds=7776000,  # 90 days
             background=True
         )
         

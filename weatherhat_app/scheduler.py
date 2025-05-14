@@ -6,9 +6,14 @@ import time
 import sys
 import threading
 import traceback
+import json
 from datetime import datetime, timedelta, timezone
 
-from weatherhat_app.data_processing import perform_database_maintenance, downsample_hourly
+from weatherhat_app.data_processing import (
+    perform_database_maintenance, 
+    downsample_hourly, 
+    DateTimeEncoder
+)
 
 class MaintenanceScheduler:
     """Scheduler for database maintenance tasks"""
@@ -20,6 +25,10 @@ class MaintenanceScheduler:
         self.daily_interval = daily_interval    # seconds between daily jobs
         self.running = False
         self.thread = None
+        
+        # Track the last maintenance times with timestamps
+        self.last_hourly = time.time() - (hourly_interval - 300)  # Run first hourly task after 5 minutes
+        self.last_daily = time.time() - (daily_interval - 600)    # Run first daily task after 10 minutes
     
     def start(self):
         """Start the scheduler thread"""
@@ -42,30 +51,28 @@ class MaintenanceScheduler:
     
     def _scheduler_loop(self):
         """Main scheduler loop"""
-        last_hourly = 0
-        last_daily = 0
         
         while self.running:
             current_time = time.time()
             
             # Check if it's time for hourly maintenance
-            if current_time - last_hourly >= self.hourly_interval:
+            if current_time - self.last_hourly >= self.hourly_interval:
                 try:
                     print("Running hourly maintenance task", file=sys.stderr)
                     # Run hourly downsampling
                     downsample_hourly(self.db)
-                    last_hourly = current_time
+                    self.last_hourly = current_time
                 except Exception as e:
                     print(f"Error in hourly maintenance: {e}", file=sys.stderr)
                     traceback.print_exc(file=sys.stderr)
             
             # Check if it's time for daily maintenance
-            if current_time - last_daily >= self.daily_interval:
+            if current_time - self.last_daily >= self.daily_interval:
                 try:
                     print("Running daily maintenance task", file=sys.stderr)
                     # Run full database maintenance
                     perform_database_maintenance(self.db)
-                    last_daily = current_time
+                    self.last_daily = current_time
                 except Exception as e:
                     print(f"Error in daily maintenance: {e}", file=sys.stderr)
                     traceback.print_exc(file=sys.stderr)
