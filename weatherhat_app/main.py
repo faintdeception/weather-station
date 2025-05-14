@@ -9,6 +9,7 @@ import sys
 import json
 import time
 import traceback
+from datetime import datetime
 
 # Load environment variables from .env file manually
 def load_env_vars():
@@ -37,7 +38,7 @@ load_env_vars()
 from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, accumulate_rainfall, cleanup_sensor
 from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurement, store_measurement, 
                                            update_records, calculate_trends, setup_retention_policies, setup_indexes,
-                                           DateTimeEncoder)
+                                           DateTimeEncoder, get_sampling_config, get_measurement_buffer)
 from weatherhat_app.reporting import generate_daily_report
 from weatherhat_app.scheduler import MaintenanceScheduler
 
@@ -91,11 +92,26 @@ def run():
         # Generate daily report if needed
         generate_daily_report(db)
         
+        # Get adaptive sampling configuration based on weather variability
+        sampling_config = get_sampling_config(db)
+        print(f"Using sampling config: {sampling_config}", file=sys.stderr)
+        
+        # Initialize measurement buffer with parameters from sampling config
+        buffer = get_measurement_buffer(
+            db=db, 
+            max_size=sampling_config.get('buffer_size', 10),
+            max_age_seconds=sampling_config.get('buffer_max_age_seconds', 300)
+        )
+        
         # Initialize sensor
         sensor = initialize_sensor()
         
-        # Take readings (discards first reading, takes 3 valid readings)
-        readings = take_readings(sensor, num_readings=3, discard_first=True)
+        # Take readings with adaptive number of samples
+        readings = take_readings(
+            sensor, 
+            num_readings=sampling_config.get('num_readings', 3), 
+            discard_first=sampling_config.get('discard_first', True)
+        )
         
         # Calculate average values for most measurements
         avg_fields = calculate_average_readings(readings)
@@ -126,11 +142,16 @@ def run():
         # Update record-breaking values
         update_records(db, measurement)
         
-        # Calculate and store trend data
-        calculate_trends(db, measurement)
+        # Calculate and store trend data - only do this every hour to reduce DB load
+        current_minute = datetime.now().minute
+        if current_minute < 5:  # Only calculate trends at the start of each hour
+            calculate_trends(db, measurement)
         
         # Store current measurement in measurements collection
         store_measurement(db, measurement)
+        
+        # Make sure any remaining buffered measurements are flushed to the database
+        buffer.flush_to_db()
         
         # Output the measurement as JSON
         print(json.dumps(measurement, cls=DateTimeEncoder))
@@ -147,6 +168,11 @@ def run():
             scheduler.stop()
             
         if mongo_client:
+            # Make sure any remaining buffered measurements are flushed
+            buffer = get_measurement_buffer(db)
+            buffer.flush_to_db()
+            
+            # Close the MongoDB connection
             mongo_client.close()
         
         if sensor:
