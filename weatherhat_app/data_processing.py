@@ -11,13 +11,17 @@ import os
 import pickle
 from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient, ASCENDING, DESCENDING, UpdateOne, InsertOne
+from bson.objectid import ObjectId
 
-# Custom JSON encoder to handle datetime objects
+# Custom JSON encoder to handle datetime objects and MongoDB ObjectIds
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, datetime):
             # Convert datetime to string
             return obj.isoformat()
+        elif isinstance(obj, ObjectId):
+            # Convert ObjectId to string
+            return str(obj)
         return super().default(obj)
 
 class MeasurementBuffer:
