@@ -23,19 +23,18 @@ router = APIRouter(prefix="/api/predictions", tags=["predictions"])
 # Dependency to get database connection
 def get_db():
     """Get MongoDB database connection"""
-    from ..services.llm_service import connect_to_mongodb
+    from ..database.connection import get_database, close_connection
     import os
     
-    mongo_uri = os.environ.get('MONGO_URI', 'mongodb://localhost:27017')
-    db_name = os.environ.get('MONGO_DB', 'weather_data')
-    
-    client = connect_to_mongodb(mongo_uri)
-    db = client[db_name]
+    # Get database using the proper connection manager
+    db = get_database()
     
     try:
         yield db
     finally:
-        client.close()
+        # Don't close the connection here as it's managed globally
+        # The close_connection() function can be called at application shutdown
+        pass
 
 @router.post("/request", response_model=PredictionResponse)
 async def request_prediction(

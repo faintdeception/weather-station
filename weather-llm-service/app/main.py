@@ -20,7 +20,8 @@ logger = logging.getLogger("llm-service")
 
 # Import API router
 from .api.routes import router as prediction_router
-from .services.llm_service import connect_to_mongodb, generate_weather_prediction
+from .services.llm_service import generate_weather_prediction
+from .database.connection import get_database, close_connection
 
 # Global scheduler
 scheduler = None
@@ -50,19 +51,16 @@ async def lifespan(app: FastAPI):
     if scheduler and scheduler.running:
         scheduler.shutdown()
         logger.info("Scheduler shutdown complete")
+    
+    # Close database connection
+    close_connection()
+    logger.info("Database connection closed")
 
 def configure_scheduler():
     """Configure and start the background scheduler for periodic tasks"""
     scheduler = BackgroundScheduler()
     
-    # Get MongoDB connection for the scheduler
-    mongo_uri = os.environ.get('MONGO_URI', 'mongodb://localhost:27017')
-    db_name = os.environ.get('MONGO_DB', 'weather_data')
-    
     try:
-        client = connect_to_mongodb(mongo_uri)
-        db = client[db_name]
-        
         # Schedule daily prediction generation at 6 AM
         def run_daily_prediction():
             try:
@@ -71,7 +69,7 @@ def configure_scheduler():
                 logger.info(f"Running scheduled prediction for {yesterday}")
                 
                 # Generate the prediction
-                result = generate_weather_prediction(db, date=yesterday)
+                result = generate_weather_prediction(date=yesterday)
                 
                 if result:
                     logger.info(f"Scheduled prediction completed successfully")
