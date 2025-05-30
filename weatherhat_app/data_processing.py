@@ -343,10 +343,10 @@ def setup_retention_policies(db):
             background=True
         )
         
-        # Keep trend data for 90 days (reduced from 180)
+        # Keep trend data for 180 days
         db.trends.create_index(
             [("timestamp_ms", 1)],
-            expireAfterSeconds=7776000,  # 90 days
+            expireAfterSeconds=15552000,  # 180 days
             background=True
         )
         
