@@ -7,6 +7,9 @@ import math
 # Mock the hardware modules before import
 sys.modules['weatherhat'] = MagicMock()
 sys.modules['pymongo'] = MagicMock()
+sys.modules['pymongo.operations'] = MagicMock()
+sys.modules['bson'] = MagicMock()
+sys.modules['bson.objectid'] = MagicMock()
 
 # Import after mocking
 sys.path.append('.')

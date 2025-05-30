@@ -40,7 +40,7 @@ from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurem
                                            update_records, calculate_trends, setup_retention_policies, setup_indexes,
                                            DateTimeEncoder, get_sampling_config, get_measurement_buffer)
 from weatherhat_app.reporting import generate_daily_report
-from weatherhat_app.scheduler import MaintenanceScheduler
+from weatherhat_app.maintenance_tracker import MaintenanceTracker
 
 # MongoDB connection settings
 MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://akuma:27017')
@@ -59,7 +59,6 @@ def run():
     
     sensor = None
     mongo_client = None
-    scheduler = None
     
     try:
         # Apply startup delay if configured
@@ -70,14 +69,15 @@ def run():
         # Connect to MongoDB
         mongo_client = connect_to_mongodb(MONGO_URI)
         db = mongo_client[DB_NAME]
-        
-        # Set up data retention policies and performance indexes
+          # Set up data retention policies and performance indexes
         setup_retention_policies(db)
         setup_indexes(db)
         
-        # Start the maintenance scheduler
-        scheduler = MaintenanceScheduler(db)
-        scheduler.start()
+        # Create maintenance tracker and check for needed maintenance
+        maintenance_tracker = MaintenanceTracker(db)
+        maintenance_tasks = maintenance_tracker.check_and_run_maintenance()
+        if maintenance_tasks:
+            print(f"Completed maintenance tasks: {maintenance_tasks}", file=sys.stderr)
         
         # Try to load the last accumulated rain value and reset time from the database
         try:
@@ -152,8 +152,7 @@ def run():
         
         # Make sure any remaining buffered measurements are flushed to the database
         buffer.flush_to_db()
-        
-        # Output the measurement as JSON
+          # Output the measurement as JSON
         print(json.dumps(measurement, cls=DateTimeEncoder))
         return 0
 
@@ -164,9 +163,6 @@ def run():
 
     finally:
         # Clean up resources
-        if scheduler:
-            scheduler.stop()
-            
         if mongo_client:
             # Make sure any remaining buffered measurements are flushed
             buffer = get_measurement_buffer(db)
