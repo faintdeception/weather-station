@@ -44,8 +44,33 @@ venv.bak/
 # IDE specific files
 .idea/
 .vscode/
+.vs/
 *.swp
 *.swo
+
+# Visual Studio specific
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vcxproj.filters
+*.vcxproj.user
+*.vssscc
+*.vspscc
+*.psess
+*.vsp
+*.vspx
+*.sap
+**/bin/
+**/obj/
+*.cache
+*.pdb
+*.lib
+*.exp
+*.exe
+*.dll
+*.app
 
 # OS specific files
 .DS_Store
@@ -55,6 +80,22 @@ venv.bak/
 .Trashes
 ehthumbs.db
 Thumbs.db
+desktop.ini
+
+# Windows specific
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
 
 # Telegraf and data related
 *.log
@@ -67,3 +108,38 @@ logs/
 # Project specific
 weatherhat_app/__pycache__/
 __pycache__/
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Local configuration
+.env.local
+config.local.*
+
+# Additional build and cache files
+*.manifest
+*.res
+*.pch
+*.idb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp_proj
+*.vspscc
+*.vssscc
+.builds/
+*.pidb
+*.svclog
+*.scc
+
+# Test results
+TestResults/
+*.testlog
+*.testrunconfig
+*.testsettings

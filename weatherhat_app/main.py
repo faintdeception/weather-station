@@ -53,6 +53,82 @@ STARTUP_DELAY = int(os.environ.get('STARTUP_DELAY', '0'))
 ACCUMULATED_RAIN = 0
 LAST_RAIN_RESET = None
 
+def process_rain_measurement(db, current_rain_count, accumulated_rain, last_reset_time):
+    """
+    Process rain measurements using difference calculation.
+    
+    The WeatherHAT rain gauge provides cumulative tip counts, so we track
+    the difference between readings to calculate actual rainfall.
+    
+    Args:
+        db: MongoDB database connection
+        current_rain_count: Current rain gauge tip count
+        accumulated_rain: Current accumulated rainfall in mm
+        last_reset_time: Time of last daily reset
+        
+    Returns:
+        tuple: (new_accumulated_rain, new_last_reset_time)
+    """
+    current_time = time.time()
+    RAIN_CALIBRATION_FACTOR = 0.2794  # mm per rain gauge tip
+    
+    # Initialize last_reset_time if it's None
+    if last_reset_time is None:
+        last_reset_time = current_time
+    
+    # Check if 24 hours have passed since the last reset
+    time_diff = current_time - last_reset_time
+    hours_24 = 24 * 60 * 60  # 24 hours in seconds
+    
+    if time_diff >= hours_24:
+        # Reset the accumulation after 24 hours
+        accumulated_rain = 0
+        last_reset_time = current_time
+        print(f"Resetting rain accumulation after 24-hour period", file=sys.stderr)
+    
+    # Load the previous rain count from database to calculate the difference
+    try:
+        rain_state = db['rain_state'].find_one({'_id': 'rain_accumulation'})
+        if rain_state:
+            previous_rain_count = rain_state.get('last_rain_count', 0)
+            
+            # Calculate the difference in tip counts
+            rain_count_diff = current_rain_count - previous_rain_count
+            
+            if rain_count_diff > 0:
+                # New rain detected - convert tips to mm
+                new_rain_mm = rain_count_diff * RAIN_CALIBRATION_FACTOR
+                accumulated_rain += new_rain_mm
+                print(f"New rain detected: {rain_count_diff} tips = {new_rain_mm:.2f}mm, total: {accumulated_rain:.2f}mm", file=sys.stderr)
+            elif rain_count_diff < 0:
+                # Rain gauge was reset (count went backwards) - start fresh
+                accumulated_rain = 0
+                print("Rain gauge appears to have been reset", file=sys.stderr)
+            else:
+                # No new rain
+                print(f"No new rain, total remains: {accumulated_rain:.2f}mm", file=sys.stderr)
+        else:
+            # First time setup
+            accumulated_rain = 0
+            print(f"Initializing rain tracking with count: {current_rain_count}", file=sys.stderr)
+            
+        # Store the updated rain state
+        db['rain_state'].update_one(
+            {'_id': 'rain_accumulation'}, 
+            {'$set': {
+                'accumulated_rain': accumulated_rain,
+                'last_reset_time': last_reset_time,
+                'last_rain_count': current_rain_count
+            }}, 
+            upsert=True
+        )
+        
+    except Exception as e:
+        print(f"Error calculating rain difference: {e}", file=sys.stderr)
+        # Don't change accumulated_rain on error
+    
+    return accumulated_rain, last_reset_time
+
 def run():
     """Main function to run the WeatherHAT application"""
     global ACCUMULATED_RAIN, LAST_RAIN_RESET
@@ -85,7 +161,8 @@ def run():
             if rain_state:
                 ACCUMULATED_RAIN = rain_state.get('accumulated_rain', 0)
                 LAST_RAIN_RESET = rain_state.get('last_reset_time')
-                print(f"Loaded rain state: accumulated={ACCUMULATED_RAIN}, last reset={LAST_RAIN_RESET}", file=sys.stderr)
+                last_rain_count = rain_state.get('last_rain_count', 0)
+                print(f"Loaded rain state: accumulated={ACCUMULATED_RAIN}mm, last reset={LAST_RAIN_RESET}, last count={last_rain_count}", file=sys.stderr)
         except Exception as e:
             print(f"Error loading rain state (using defaults): {e}", file=sys.stderr)
         
@@ -116,21 +193,12 @@ def run():
         # Calculate average values for most measurements
         avg_fields = calculate_average_readings(readings)
         
-        # Handle rain accumulation separately (don't average it)
-        ACCUMULATED_RAIN, LAST_RAIN_RESET = accumulate_rainfall(readings, ACCUMULATED_RAIN, LAST_RAIN_RESET)
+        # Handle rain accumulation separately using difference calculation
+        current_rain_count, _ = accumulate_rainfall(readings, ACCUMULATED_RAIN, LAST_RAIN_RESET)
+        ACCUMULATED_RAIN, LAST_RAIN_RESET = process_rain_measurement(db, current_rain_count, ACCUMULATED_RAIN, LAST_RAIN_RESET)
         
         # Replace the averaged rain value with the accumulated value
         avg_fields['rain'] = ACCUMULATED_RAIN
-        
-        # Store the updated rain state
-        db['rain_state'].update_one(
-            {'_id': 'rain_accumulation'}, 
-            {'$set': {
-                'accumulated_rain': ACCUMULATED_RAIN,
-                'last_reset_time': LAST_RAIN_RESET
-            }}, 
-            upsert=True
-        )
         
         # Add cardinal wind direction
         if "wind_direction" in avg_fields:
