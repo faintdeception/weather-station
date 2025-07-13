@@ -100,12 +100,16 @@ def accumulate_rainfall(readings, accumulated_rain=0, last_reset_time=None):
         return 0, time.time()
     
     # Get the current rain count (use the last reading since it's most recent)
-    current_rain_count = readings[-1]["rain"] if readings else 0
+    raw_rain_count = readings[-1]["rain"] if readings else 0
+    
+    # Round to nearest whole number since rain gauge should provide integer counts
+    # We're seeing fractional values which suggests a WeatherHAT library issue
+    current_rain_count = round(raw_rain_count)
     current_time = time.time()
     
-    print(f"Raw rain gauge reading: {current_rain_count} tips", file=sys.stderr)
+    print(f"Raw rain gauge reading: {raw_rain_count} tips (rounded to {current_rain_count})", file=sys.stderr)
     
-    # Return the raw count - main application handles the rest
+    # Return the rounded count - main application handles the rest
     return current_rain_count, current_time
 
 def cleanup_sensor(sensor):

@@ -92,6 +92,8 @@ def process_rain_measurement(db, current_rain_count, accumulated_rain, last_rese
         if rain_state:
             previous_rain_count = rain_state.get('last_rain_count', 0)
             
+            print(f"Rain comparison: current={current_rain_count}, previous={previous_rain_count}", file=sys.stderr)
+            
             # Calculate the difference in tip counts
             rain_count_diff = current_rain_count - previous_rain_count
             
@@ -100,16 +102,16 @@ def process_rain_measurement(db, current_rain_count, accumulated_rain, last_rese
                 new_rain_mm = rain_count_diff * RAIN_CALIBRATION_FACTOR
                 accumulated_rain += new_rain_mm
                 print(f"New rain detected: {rain_count_diff} tips = {new_rain_mm:.2f}mm, total: {accumulated_rain:.2f}mm", file=sys.stderr)
-            elif rain_count_diff < 0:
-                # Rain gauge was reset (count went backwards) - start fresh
-                accumulated_rain = 0
-                print("Rain gauge appears to have been reset", file=sys.stderr)
+            elif rain_count_diff < 0 or current_rain_count < (previous_rain_count * 0.5):
+                # Rain gauge was reset (count went backwards or dropped significantly)
+                # Don't reset accumulated rain, just update the base count
+                print(f"Rain gauge appears to have been reset (count went from {previous_rain_count} to {current_rain_count})", file=sys.stderr)
+                # Don't change accumulated_rain - this preserves the daily total
             else:
                 # No new rain
                 print(f"No new rain, total remains: {accumulated_rain:.2f}mm", file=sys.stderr)
         else:
             # First time setup
-            accumulated_rain = 0
             print(f"Initializing rain tracking with count: {current_rain_count}", file=sys.stderr)
             
         # Store the updated rain state
