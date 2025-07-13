@@ -49,91 +49,100 @@ DB_NAME = os.environ.get('MONGO_DB', 'weather_data')
 # Add a delay at startup to allow MongoDB to initialize if starting together
 STARTUP_DELAY = int(os.environ.get('STARTUP_DELAY', '0'))
 
-# Global variables for rain accumulation
-ACCUMULATED_RAIN = 0
-LAST_RAIN_RESET = None
+# Rain processing is now handled entirely in the database
+# No global variables needed
 
-def process_rain_measurement(db, current_rain_count, accumulated_rain, last_reset_time):
+def process_rain_measurement(db, current_rain_count):
     """
-    Process rain measurements using difference calculation.
+    Process rain measurements and return incremental rainfall for this measurement.
     
     The WeatherHAT rain gauge provides cumulative tip counts, so we track
-    the difference between readings to calculate actual rainfall.
+    the difference between readings to calculate incremental rainfall.
+    This returns the amount of rain that fell since the last measurement,
+    not the cumulative daily total.
     
     Args:
         db: MongoDB database connection
         current_rain_count: Current rain gauge tip count
-        accumulated_rain: Current accumulated rainfall in mm
-        last_reset_time: Time of last daily reset
         
     Returns:
-        tuple: (new_accumulated_rain, new_last_reset_time)
+        float: Incremental rainfall in mm for this measurement period
     """
     current_time = time.time()
     RAIN_CALIBRATION_FACTOR = 0.2794  # mm per rain gauge tip
     
-    # Initialize last_reset_time if it's None
-    if last_reset_time is None:
-        last_reset_time = current_time
-    
-    # Check if 24 hours have passed since the last reset
-    time_diff = current_time - last_reset_time
-    hours_24 = 24 * 60 * 60  # 24 hours in seconds
-    
-    if time_diff >= hours_24:
-        # Reset the accumulation after 24 hours
-        accumulated_rain = 0
-        last_reset_time = current_time
-        print(f"Resetting rain accumulation after 24-hour period", file=sys.stderr)
-    
-    # Load the previous rain count from database to calculate the difference
+    # Load the previous rain state from database
     try:
         rain_state = db['rain_state'].find_one({'_id': 'rain_accumulation'})
-        if rain_state:
-            previous_rain_count = rain_state.get('last_rain_count', 0)
-            
-            print(f"Rain comparison: current={current_rain_count}, previous={previous_rain_count}", file=sys.stderr)
-            
-            # Calculate the difference in tip counts
-            rain_count_diff = current_rain_count - previous_rain_count
-            
-            if rain_count_diff > 0:
-                # New rain detected - convert tips to mm
-                new_rain_mm = rain_count_diff * RAIN_CALIBRATION_FACTOR
-                accumulated_rain += new_rain_mm
-                print(f"New rain detected: {rain_count_diff} tips = {new_rain_mm:.2f}mm, total: {accumulated_rain:.2f}mm", file=sys.stderr)
-            elif rain_count_diff < 0 or current_rain_count < (previous_rain_count * 0.5):
-                # Rain gauge was reset (count went backwards or dropped significantly)
-                # Don't reset accumulated rain, just update the base count
-                print(f"Rain gauge appears to have been reset (count went from {previous_rain_count} to {current_rain_count})", file=sys.stderr)
-                # Don't change accumulated_rain - this preserves the daily total
-            else:
-                # No new rain
-                print(f"No new rain, total remains: {accumulated_rain:.2f}mm", file=sys.stderr)
-        else:
-            # First time setup
+        if not rain_state:
+            # First time setup - initialize state
             print(f"Initializing rain tracking with count: {current_rain_count}", file=sys.stderr)
-            
-        # Store the updated rain state
+            db['rain_state'].update_one(
+                {'_id': 'rain_accumulation'},
+                {'$set': {
+                    'accumulated_rain': 0,
+                    'last_reset_time': current_time,
+                    'last_rain_count': current_rain_count
+                }},
+                upsert=True
+            )
+            return 0.0  # No incremental rain for first measurement
+        
+        accumulated_rain = rain_state.get('accumulated_rain', 0)
+        last_reset_time = rain_state.get('last_reset_time', current_time)
+        previous_rain_count = rain_state.get('last_rain_count', 0)
+        
+        # Check for daily reset (at midnight)
+        from datetime import datetime
+        current_date = datetime.fromtimestamp(current_time).date()
+        last_reset_date = datetime.fromtimestamp(last_reset_time).date()
+        
+        if current_date > last_reset_date:
+            print(f"Daily reset - clearing accumulated rain", file=sys.stderr)
+            accumulated_rain = 0
+            last_reset_time = current_time
+            previous_rain_count = current_rain_count  # Reset baseline count
+        
+        print(f"Rain comparison: current={current_rain_count}, previous={previous_rain_count}", file=sys.stderr)
+        
+        # Calculate incremental rain for THIS measurement
+        rain_count_diff = current_rain_count - previous_rain_count
+        incremental_rain_mm = 0.0
+        
+        # Handle gauge reset (count went backwards or dropped significantly)
+        if rain_count_diff < 0 or current_rain_count < (previous_rain_count * 0.5):
+            print(f"Rain gauge reset detected (count went from {previous_rain_count} to {current_rain_count})", file=sys.stderr)
+            rain_count_diff = 0
+            # Don't add any incremental rain, just update the base count
+        
+        # Calculate incremental rain for this measurement
+        if rain_count_diff > 0:
+            incremental_rain_mm = rain_count_diff * RAIN_CALIBRATION_FACTOR
+            accumulated_rain += incremental_rain_mm
+            print(f"New rain detected: {rain_count_diff} tips = {incremental_rain_mm:.2f}mm, daily total: {accumulated_rain:.2f}mm", file=sys.stderr)
+        else:
+            print(f"No new rain, daily total remains: {accumulated_rain:.2f}mm", file=sys.stderr)
+        
+        # Update rain state in database
         db['rain_state'].update_one(
-            {'_id': 'rain_accumulation'}, 
+            {'_id': 'rain_accumulation'},
             {'$set': {
                 'accumulated_rain': accumulated_rain,
                 'last_reset_time': last_reset_time,
                 'last_rain_count': current_rain_count
-            }}, 
+            }},
             upsert=True
         )
         
+        # Return INCREMENTAL rain for this measurement (not cumulative)
+        return incremental_rain_mm
+        
     except Exception as e:
         print(f"Error calculating rain difference: {e}", file=sys.stderr)
-        # Don't change accumulated_rain on error
-    
-    return accumulated_rain, last_reset_time
+        return 0.0
 
 def run():
     """Main function to run the WeatherHAT application"""
-    global ACCUMULATED_RAIN, LAST_RAIN_RESET
     
     sensor = None
     mongo_client = None
@@ -157,16 +166,7 @@ def run():
         if maintenance_tasks:
             print(f"Completed maintenance tasks: {maintenance_tasks}", file=sys.stderr)
         
-        # Try to load the last accumulated rain value and reset time from the database
-        try:
-            rain_state = db['rain_state'].find_one({'_id': 'rain_accumulation'})
-            if rain_state:
-                ACCUMULATED_RAIN = rain_state.get('accumulated_rain', 0)
-                LAST_RAIN_RESET = rain_state.get('last_reset_time')
-                last_rain_count = rain_state.get('last_rain_count', 0)
-                print(f"Loaded rain state: accumulated={ACCUMULATED_RAIN}mm, last reset={LAST_RAIN_RESET}, last count={last_rain_count}", file=sys.stderr)
-        except Exception as e:
-            print(f"Error loading rain state (using defaults): {e}", file=sys.stderr)
+        # Rain state is now loaded automatically in process_rain_measurement function
         
         # Generate daily report if needed
         generate_daily_report(db)
@@ -196,11 +196,12 @@ def run():
         avg_fields = calculate_average_readings(readings)
         
         # Handle rain accumulation separately using difference calculation
-        current_rain_count, _ = accumulate_rainfall(readings, ACCUMULATED_RAIN, LAST_RAIN_RESET)
-        ACCUMULATED_RAIN, LAST_RAIN_RESET = process_rain_measurement(db, current_rain_count, ACCUMULATED_RAIN, LAST_RAIN_RESET)
+        current_rain_count, _ = accumulate_rainfall(readings)
+        incremental_rain_mm = process_rain_measurement(db, current_rain_count)
         
-        # Replace the averaged rain value with the accumulated value
-        avg_fields['rain'] = ACCUMULATED_RAIN
+        # Use incremental rain in the measurement (not cumulative daily total)
+        # This allows downstream systems to sum rain values to get accurate daily totals
+        avg_fields['rain'] = incremental_rain_mm
         
         # Add cardinal wind direction
         if "wind_direction" in avg_fields:

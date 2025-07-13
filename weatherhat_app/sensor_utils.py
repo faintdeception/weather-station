@@ -107,7 +107,16 @@ def accumulate_rainfall(readings, accumulated_rain=0, last_reset_time=None):
     current_rain_count = round(raw_rain_count)
     current_time = time.time()
     
+    # Enhanced logging to diagnose rain gauge issues
     print(f"Raw rain gauge reading: {raw_rain_count} tips (rounded to {current_rain_count})", file=sys.stderr)
+    
+    # Check if rain gauge appears to be stuck at zero
+    if raw_rain_count == 0.0:
+        print(f"WARNING: Rain gauge reading exactly 0.0 - possible hardware reset or sensor issue", file=sys.stderr)
+    
+    # Log all raw readings for debugging
+    all_rain_readings = [r["rain"] for r in readings]
+    print(f"All rain readings this cycle: {all_rain_readings}", file=sys.stderr)
     
     # Return the rounded count - main application handles the rest
     return current_rain_count, current_time
