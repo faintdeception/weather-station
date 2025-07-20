@@ -23,21 +23,50 @@ def take_readings(sensor, num_readings=3, discard_first=True):
     """
     Take multiple readings from the sensor, optionally discarding the first one.
     Returns a list of reading dictionaries.
+    
+    Wind and rain measurements require longer intervals to be accurate, so we use
+    a longer sampling interval for the first reading to get valid wind/rain data.
     """
     readings = []
     
-    # Take first reading and discard (warm-up)
+    # Take first reading with a longer interval to get valid wind/rain measurements
+    # Wind speed requires time to accumulate anemometer counts for accurate readings
     if discard_first:
         print("Taking initial warm-up reading (will be discarded)...", file=sys.stderr)
-        sensor.update(interval=1.0)
+        sensor.update(interval=5.0)  # Longer interval for wind/rain accumulation
         time.sleep(1)  # Short delay after warm-up reading
     
-    # Take valid readings
-    for i in range(num_readings):
-        print(f"Taking sensor reading {i+1}/{num_readings}...", file=sys.stderr)
-        sensor.update(interval=1.0)
+    # Take the primary reading with appropriate interval for wind/rain measurements
+    print("Taking primary sensor reading with wind/rain measurement...", file=sys.stderr)
+    sensor.update(interval=5.0)  # 5-second interval for accurate wind speed
+    
+    # Store the primary reading
+    primary_reading = {
+        "device_temperature": float(sensor.device_temperature),
+        "temperature": float(sensor.temperature),
+        "humidity": float(sensor.humidity),
+        "dewpoint": float(sensor.dewpoint),
+        "lux": float(sensor.lux),
+        "pressure": float(sensor.pressure),
+        "wind_speed": float(sensor.wind_speed),
+        "rain": float(sensor.rain),
+        "wind_direction": float(sensor.wind_direction)
+    }
+    readings.append(primary_reading)
+    
+    # Log wind/rain update status for debugging
+    if hasattr(sensor, 'updated_wind_rain'):
+        print(f"  Wind/rain updated: {sensor.updated_wind_rain}", file=sys.stderr)
+    
+    print(f"  Primary reading: Wind={sensor.wind_speed:.2f}m/s, Rain={sensor.rain:.2f}mm", file=sys.stderr)
+    
+    # Take additional readings for temperature/pressure/humidity averaging
+    # These don't need long intervals and we reuse wind/rain from the primary reading
+    for i in range(num_readings - 1):
+        print(f"Taking supplementary reading {i+2}/{num_readings}...", file=sys.stderr)
+        sensor.update(interval=1.0)  # Short interval for temperature/pressure/humidity only
         
-        # Store the current values
+        # Store reading but reuse wind/rain values from primary reading
         reading = {
             "device_temperature": float(sensor.device_temperature),
             "temperature": float(sensor.temperature),
@@ -45,14 +74,14 @@ def take_readings(sensor, num_readings=3, discard_first=True):
             "dewpoint": float(sensor.dewpoint),
             "lux": float(sensor.lux),
             "pressure": float(sensor.pressure),
-            "wind_speed": float(sensor.wind_speed),
-            "rain": float(sensor.rain),
-            "wind_direction": float(sensor.wind_direction)
+            "wind_speed": primary_reading["wind_speed"],  # Reuse from primary reading
+            "rain": primary_reading["rain"],              # Reuse from primary reading
+            "wind_direction": primary_reading["wind_direction"]  # Reuse from primary reading
         }
         readings.append(reading)
         
         # Print current values for debugging
-        print(f"  Reading {i+1}: Temp={sensor.temperature}°C, Humidity={sensor.humidity}%", file=sys.stderr)
+        print(f"  Reading {i+2}: Temp={sensor.temperature:.1f}°C, Humidity={sensor.humidity:.1f}%", file=sys.stderr)
         time.sleep(1)  # Short delay between readings
     
     return readings
