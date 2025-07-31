@@ -14,24 +14,34 @@ echo "Starting WeatherHAT service deployment..."
 echo "Repository directory: $REPO_DIR"
 echo "Running as user: $USER"
 
-# Detect Python environment
+# Detect Python environment and test weatherhat import
 PYTHON_PATH=""
 CONDA_ENV=""
 
-if [ -n "$CONDA_DEFAULT_ENV" ]; then
-    echo "Detected conda environment: $CONDA_DEFAULT_ENV"
-    CONDA_ENV="$CONDA_DEFAULT_ENV"
+echo "Testing current Python for weatherhat library..."
+if python -c "import weatherhat" 2>/dev/null; then
     PYTHON_PATH="$(which python)"
-    echo "Using Python from: $PYTHON_PATH"
-elif command -v conda &> /dev/null; then
-    echo "Conda available but no active environment detected"
-    echo "Please activate your pimoroni environment first:"
-    echo "  conda activate pimoroni"
-    echo "  ./deploy_service.sh"
-    exit 1
+    echo "✓ Found weatherhat library with Python at: $PYTHON_PATH"
+    
+    # Check if this is a conda/virtual environment
+    PYTHON_PREFIX="$(python -c "import sys; print(sys.prefix)")"
+    if [[ "$PYTHON_PREFIX" != "/usr" ]]; then
+        echo "Using environment at: $PYTHON_PREFIX"
+        if [ -n "$CONDA_DEFAULT_ENV" ]; then
+            CONDA_ENV="$CONDA_DEFAULT_ENV"
+            echo "Conda environment: $CONDA_ENV"
+        fi
+    fi
 else
-    echo "No conda detected, using system Python"
-    PYTHON_PATH="/usr/bin/python3"
+    echo "❌ weatherhat library not found with current Python"
+    echo "Current Python: $(which python)"
+    echo ""
+    echo "Please ensure you're in the correct environment where weatherhat is installed."
+    echo "You may need to:"
+    echo "  1. Activate your virtual environment"
+    echo "  2. Install weatherhat: pip install pimoroni-weatherhat"
+    echo "  3. Re-run this script"
+    exit 1
 fi
 
 # Check if running as root
