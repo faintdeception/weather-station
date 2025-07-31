@@ -24,48 +24,29 @@ def take_readings(sensor, num_readings=3, discard_first=True):
     Take multiple readings from the sensor, optionally discarding the first one.
     Returns a list of reading dictionaries.
     
-    Based on WeatherHAT examples, wind and rain are measured over intervals and should
-    use a sufficient interval for accurate readings. We'll take one primary reading
-    with appropriate interval, then additional readings for temperature averaging.
+    Based on the working WeatherHAT averaging.py example, we should use a single
+    5-second interval update and check updated_wind_rain for valid wind/rain data.
     """
     readings = []
     
-    # Take first reading and discard (warm-up) - use longer interval to ensure wind/rain update
+    # Take first reading and discard (warm-up)
     if discard_first:
         print("Taking initial warm-up reading (will be discarded)...", file=sys.stderr)
-        sensor.update(interval=5.0)  # Use 5-second interval as per WeatherHAT examples
+        sensor.update(interval=5.0)  # Use 5-second interval like working example
         time.sleep(1)  # Short delay after warm-up reading
     
-    # Take primary reading with sufficient interval for wind/rain measurements
-    print("Taking primary sensor reading with 5-second interval for wind/rain...", file=sys.stderr)
-    sensor.update(interval=5.0)  # 5-second interval for accurate wind/rain measurements
-    
-    # Debug: Check if wind/rain data was updated
-    if hasattr(sensor, 'updated_wind_rain'):
-        print(f"  Wind/rain updated this cycle: {sensor.updated_wind_rain}", file=sys.stderr)
-    
-    # Store the primary reading with actual wind/rain values
-    primary_reading = {
-        "device_temperature": float(sensor.device_temperature),
-        "temperature": float(sensor.temperature),
-        "humidity": float(sensor.humidity),
-        "dewpoint": float(sensor.dewpoint),
-        "lux": float(sensor.lux),
-        "pressure": float(sensor.pressure),
-        "wind_speed": float(sensor.wind_speed),
-        "rain": float(sensor.rain),
-        "wind_direction": float(sensor.wind_direction)
-    }
-    readings.append(primary_reading)
-    
-    print(f"  Primary reading: Temp={sensor.temperature:.1f}°C, Wind={sensor.wind_speed:.2f}m/s, Rain={sensor.rain:.2f}mm", file=sys.stderr)
-    
-    # Take additional readings for averaging other measurements (but keep wind/rain from primary)
-    for i in range(num_readings - 1):
-        print(f"Taking supplementary reading {i+2}/{num_readings}...", file=sys.stderr)
-        sensor.update(interval=1.0)  # Short interval for other measurements
+    # Take readings using the same pattern as the working averaging.py example
+    for i in range(num_readings):
+        print(f"Taking sensor reading {i+1}/{num_readings}...", file=sys.stderr)
         
-        # Store reading - use current values for everything except wind/rain
+        # Update sensor with 5-second interval (like working example)
+        sensor.update(interval=5.0)
+        
+        # Debug: Check if wind/rain data was updated
+        if hasattr(sensor, 'updated_wind_rain'):
+            print(f"  Wind/rain updated this cycle: {sensor.updated_wind_rain}", file=sys.stderr)
+        
+        # Store the current values - use actual sensor readings
         reading = {
             "device_temperature": float(sensor.device_temperature),
             "temperature": float(sensor.temperature),
@@ -73,14 +54,18 @@ def take_readings(sensor, num_readings=3, discard_first=True):
             "dewpoint": float(sensor.dewpoint),
             "lux": float(sensor.lux),
             "pressure": float(sensor.pressure),
-            "wind_speed": primary_reading["wind_speed"],      # Use primary reading
-            "rain": primary_reading["rain"],                  # Use primary reading  
-            "wind_direction": primary_reading["wind_direction"]  # Use primary reading
+            "wind_speed": float(sensor.wind_speed),
+            "rain": float(sensor.rain),
+            "wind_direction": float(sensor.wind_direction)
         }
         readings.append(reading)
         
-        print(f"  Reading {i+2}: Temp={sensor.temperature:.1f}°C, Humidity={sensor.humidity:.1f}%", file=sys.stderr)
-        time.sleep(1)  # Short delay between readings
+        # Print current values for debugging
+        print(f"  Reading {i+1}: Temp={sensor.temperature:.1f}°C, Wind={sensor.wind_speed:.2f}m/s, Rain={sensor.rain:.3f}mm/s, Direction={sensor.wind_direction:.0f}°", file=sys.stderr)
+        
+        # Add delay between readings (like working example)
+        if i < num_readings - 1:  # Don't sleep after last reading
+            time.sleep(5.0)  # 5-second delay like working example
     
     return readings
 
@@ -110,10 +95,11 @@ def calculate_average_readings(readings):
 
 def accumulate_rainfall(readings, accumulated_rain=0, last_reset_time=None):
     """
-    Simple function to extract rain gauge reading from sensor data.
+    Extract rain gauge reading from sensor data.
     
-    The rain gauge provides a cumulative count of bucket tips since device startup.
-    The main application handles the difference calculation and accumulation logic.
+    NOTE: Based on working WeatherHAT examples, sensor.rain provides mm/sec rate,
+    not cumulative tip counts as we originally thought. This function is kept
+    for compatibility but may not be needed.
     
     Args:
         readings: List of reading dictionaries containing rain measurements
@@ -121,32 +107,24 @@ def accumulate_rainfall(readings, accumulated_rain=0, last_reset_time=None):
         last_reset_time: Not used - kept for compatibility
     
     Returns:
-        tuple: (current_rain_count, current_timestamp)
+        tuple: (current_rain_rate, current_timestamp)
     """
     if not readings:
         return 0, time.time()
     
-    # Get the current rain count (use the last reading since it's most recent)
-    raw_rain_count = readings[-1]["rain"] if readings else 0
-    
-    # DON'T round - preserve the exact value from the sensor
-    # The WeatherHAT library may use fractional values for its calculations
-    current_rain_count = raw_rain_count
+    # Get the current rain rate (sensor.rain gives mm/sec, not tip counts)
+    rain_rate_mm_sec = readings[-1]["rain"] if readings else 0
     current_time = time.time()
     
-    # Enhanced logging to diagnose rain gauge issues
-    print(f"Rain gauge reading: {raw_rain_count} (preserving exact value)", file=sys.stderr)
+    # Log for debugging
+    print(f"Rain rate from sensor: {rain_rate_mm_sec:.3f} mm/sec", file=sys.stderr)
     
-    # Check if rain gauge appears to be stuck at zero
-    if raw_rain_count == 0.0:
-        print(f"INFO: Rain gauge reading 0.0 - no rain detected or possible hardware reset", file=sys.stderr)
-    
-    # Log all raw readings for debugging
+    # Log all rain readings for debugging
     all_rain_readings = [r["rain"] for r in readings]
     print(f"All rain readings this cycle: {all_rain_readings}", file=sys.stderr)
     
-    # Return the exact count - main application handles the rest
-    return current_rain_count, current_time
+    # Return the rain rate - this matches the working example format
+    return rain_rate_mm_sec, current_time
 
 def cleanup_sensor(sensor):
     """Clean up the sensor resources"""

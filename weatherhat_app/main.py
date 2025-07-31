@@ -187,22 +187,22 @@ def run():
         
         # Take readings with adaptive number of samples
         # Use a longer interval to ensure wind and rain measurements have time to accumulate
+        # Based on working averaging.py example, we use fewer readings with longer intervals
         readings = take_readings(
             sensor, 
-            num_readings=sampling_config.get('num_readings', 3), 
+            num_readings=min(sampling_config.get('num_readings', 3), 2),  # Max 2 readings due to longer intervals
             discard_first=sampling_config.get('discard_first', True)
         )
         
         # Calculate average values for most measurements
         avg_fields = calculate_average_readings(readings)
         
-        # Handle rain accumulation separately using difference calculation
-        current_rain_count, _ = accumulate_rainfall(readings)
-        incremental_rain_mm = process_rain_measurement(db, current_rain_count)
+        # Rain handling: sensor.rain already provides mm/sec rate (like working example)
+        # No need for complex tip count processing - use the sensor value directly
+        print(f"Rain rate from sensor: {avg_fields.get('rain', 0):.3f} mm/sec", file=sys.stderr)
         
-        # Use incremental rain in the measurement (not cumulative daily total)
-        # This allows downstream systems to sum rain values to get accurate daily totals
-        avg_fields['rain'] = incremental_rain_mm
+        # The avg_fields['rain'] already contains the correct mm/sec value from sensor.rain
+        # This matches the working averaging.py example output format
         
         # Add cardinal wind direction
         if "wind_direction" in avg_fields:
