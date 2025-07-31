@@ -186,6 +186,7 @@ def run():
         sensor = initialize_sensor()
         
         # Take readings with adaptive number of samples
+        # Use a longer interval to ensure wind and rain measurements have time to accumulate
         readings = take_readings(
             sensor, 
             num_readings=sampling_config.get('num_readings', 3), 
