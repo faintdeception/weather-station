@@ -6,15 +6,15 @@ Wants=mongod.service
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/weather-station
-Environment="PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Environment="PYTHONPATH=/home/pi/weather-station"
+User=REPLACE_USER
+Group=REPLACE_USER
+WorkingDirectory=REPLACE_REPO_DIR
+Environment="PATH=REPLACE_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONPATH=REPLACE_REPO_DIR"
 Environment="WEATHER_LOCATION=backyard"
 Environment="WEATHER_INTERVAL=60"
-EnvironmentFile=-/home/pi/weather-station/.env
-ExecStart=/usr/bin/python3 /home/pi/weather-station/weatherhat_service.py
+EnvironmentFile=-REPLACE_REPO_DIR/.env
+ExecStart=/usr/bin/python3 REPLACE_REPO_DIR/weatherhat_service.py
 Restart=always
 RestartSec=10
 StartLimitBurst=5
@@ -29,7 +29,7 @@ SyslogIdentifier=weatherhat
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/home/pi/weather-station
+ReadWritePaths=REPLACE_REPO_DIR
 
 [Install]
 WantedBy=multi-user.target

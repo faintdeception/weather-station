@@ -7,14 +7,16 @@ set -e
 
 SERVICE_NAME="weatherhat"
 SERVICE_FILE="systemd/${SERVICE_NAME}.service"
-REPO_DIR="/home/pi/weather-station"
-USER="pi"
+REPO_DIR="$(pwd)"
+USER="$(whoami)"
 
 echo "Starting WeatherHAT service deployment..."
+echo "Repository directory: $REPO_DIR"
+echo "Running as user: $USER"
 
 # Check if running as root
 if [ "$EUID" -eq 0 ]; then
-    echo "This script should not be run as root. Please run as user 'pi'."
+    echo "This script should not be run as root. Please run as your regular user."
     exit 1
 fi
 
@@ -28,7 +30,17 @@ sudo systemctl stop $SERVICE_NAME || echo "WeatherHAT service was not running"
 
 # Install the systemd service file
 echo "Installing systemd service file..."
-sudo cp "$SERVICE_FILE" "/etc/systemd/system/$SERVICE_NAME.service"
+TEMP_SERVICE_FILE="/tmp/${SERVICE_NAME}.service"
+HOME_DIR="$(eval echo ~$USER)"
+
+# Create service file with correct paths
+sed -e "s|REPLACE_USER|$USER|g" \
+    -e "s|REPLACE_REPO_DIR|$REPO_DIR|g" \
+    -e "s|REPLACE_HOME|$HOME_DIR|g" \
+    "$SERVICE_FILE" > "$TEMP_SERVICE_FILE"
+
+sudo cp "$TEMP_SERVICE_FILE" "/etc/systemd/system/$SERVICE_NAME.service"
+rm "$TEMP_SERVICE_FILE"
 
 # Reload systemd daemon
 echo "Reloading systemd daemon..."
@@ -40,6 +52,7 @@ sudo chown root:root "/etc/systemd/system/$SERVICE_NAME.service"
 sudo chmod 644 "/etc/systemd/system/$SERVICE_NAME.service"
 
 # Make sure the Python script is executable
+echo "Making Python script executable..."
 chmod +x "$REPO_DIR/weatherhat_service.py"
 
 # Enable the service to start on boot
