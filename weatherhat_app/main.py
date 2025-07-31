@@ -35,7 +35,7 @@ def load_env_vars():
 # Try to load from .env file
 load_env_vars()
 
-from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, accumulate_rainfall, cleanup_sensor
+from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, cleanup_sensor
 from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurement, store_measurement, 
                                            update_records, calculate_trends, setup_retention_policies, setup_indexes,
                                            DateTimeEncoder, get_sampling_config, get_measurement_buffer)

@@ -43,10 +43,14 @@ def take_readings(sensor, num_readings=3, discard_first=True):
         sensor.update(interval=5.0)
         
         # Debug: Check if wind/rain data was updated
+        wind_rain_updated = False
         if hasattr(sensor, 'updated_wind_rain'):
-            print(f"  Wind/rain updated this cycle: {sensor.updated_wind_rain}", file=sys.stderr)
+            wind_rain_updated = sensor.updated_wind_rain
+            print(f"  Wind/rain updated this cycle: {wind_rain_updated}", file=sys.stderr)
         
         # Store the current values - use actual sensor readings
+        # Important: Only use rain values when updated_wind_rain is True (like working example)
+        # Wind direction seems to work continuously, so we'll keep using it always
         reading = {
             "device_temperature": float(sensor.device_temperature),
             "temperature": float(sensor.temperature),
@@ -54,14 +58,15 @@ def take_readings(sensor, num_readings=3, discard_first=True):
             "dewpoint": float(sensor.dewpoint),
             "lux": float(sensor.lux),
             "pressure": float(sensor.pressure),
-            "wind_speed": float(sensor.wind_speed),
-            "rain": float(sensor.rain),
-            "wind_direction": float(sensor.wind_direction)
+            "wind_speed": float(sensor.wind_speed),  # Always use wind_speed
+            "rain": float(sensor.rain) if wind_rain_updated else 0.0,  # Only use rain when updated
+            "wind_direction": float(sensor.wind_direction)  # Always use (seems to work continuously)
         }
         readings.append(reading)
         
         # Print current values for debugging
-        print(f"  Reading {i+1}: Temp={sensor.temperature:.1f}°C, Wind={sensor.wind_speed:.2f}m/s, Rain={sensor.rain:.3f}mm/s, Direction={sensor.wind_direction:.0f}°", file=sys.stderr)
+        rain_status = "VALID" if wind_rain_updated else "STALE"
+        print(f"  Reading {i+1}: Temp={sensor.temperature:.1f}°C, Wind={sensor.wind_speed:.2f}m/s, Rain={reading['rain']:.3f}mm/s ({rain_status}), Direction={sensor.wind_direction:.0f}°", file=sys.stderr)
         
         # Add delay between readings (like working example)
         if i < num_readings - 1:  # Don't sleep after last reading
