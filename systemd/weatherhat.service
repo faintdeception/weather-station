@@ -1,0 +1,35 @@
+[Unit]
+Description=WeatherHAT Monitoring Service
+Documentation=https://github.com/faintdeception/weather-station
+After=network.target mongod.service
+Wants=mongod.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/weather-station
+Environment="PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONPATH=/home/pi/weather-station"
+Environment="WEATHER_LOCATION=backyard"
+Environment="WEATHER_INTERVAL=60"
+EnvironmentFile=-/home/pi/weather-station/.env
+ExecStart=/usr/bin/python3 /home/pi/weather-station/weatherhat_service.py
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=weatherhat
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/pi/weather-station
+
+[Install]
+WantedBy=multi-user.target
