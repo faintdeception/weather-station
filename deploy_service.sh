@@ -14,6 +14,26 @@ echo "Starting WeatherHAT service deployment..."
 echo "Repository directory: $REPO_DIR"
 echo "Running as user: $USER"
 
+# Detect Python environment
+PYTHON_PATH=""
+CONDA_ENV=""
+
+if [ -n "$CONDA_DEFAULT_ENV" ]; then
+    echo "Detected conda environment: $CONDA_DEFAULT_ENV"
+    CONDA_ENV="$CONDA_DEFAULT_ENV"
+    PYTHON_PATH="$(which python)"
+    echo "Using Python from: $PYTHON_PATH"
+elif command -v conda &> /dev/null; then
+    echo "Conda available but no active environment detected"
+    echo "Please activate your pimoroni environment first:"
+    echo "  conda activate pimoroni"
+    echo "  ./deploy_service.sh"
+    exit 1
+else
+    echo "No conda detected, using system Python"
+    PYTHON_PATH="/usr/bin/python3"
+fi
+
 # Check if running as root
 if [ "$EUID" -eq 0 ]; then
     echo "This script should not be run as root. Please run as your regular user."
@@ -37,6 +57,8 @@ HOME_DIR="$(eval echo ~$USER)"
 sed -e "s|REPLACE_USER|$USER|g" \
     -e "s|REPLACE_REPO_DIR|$REPO_DIR|g" \
     -e "s|REPLACE_HOME|$HOME_DIR|g" \
+    -e "s|REPLACE_PYTHON|$PYTHON_PATH|g" \
+    -e "s|REPLACE_CONDA_ENV|$CONDA_ENV|g" \
     "$SERVICE_FILE" > "$TEMP_SERVICE_FILE"
 
 sudo cp "$TEMP_SERVICE_FILE" "/etc/systemd/system/$SERVICE_NAME.service"

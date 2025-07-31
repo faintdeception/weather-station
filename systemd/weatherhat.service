@@ -9,12 +9,12 @@ Type=simple
 User=REPLACE_USER
 Group=REPLACE_USER
 WorkingDirectory=REPLACE_REPO_DIR
-Environment="PATH=REPLACE_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="PYTHONPATH=REPLACE_REPO_DIR"
+Environment="CONDA_DEFAULT_ENV=REPLACE_CONDA_ENV"
 Environment="WEATHER_LOCATION=backyard"
 Environment="WEATHER_INTERVAL=60"
 EnvironmentFile=-REPLACE_REPO_DIR/.env
-ExecStart=/usr/bin/python3 REPLACE_REPO_DIR/weatherhat_service.py
+ExecStart=REPLACE_PYTHON REPLACE_REPO_DIR/weatherhat_service.py
 Restart=always
 RestartSec=10
 StartLimitBurst=5
