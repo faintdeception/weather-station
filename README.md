@@ -1,60 +1,65 @@
-# Weather HAT MongoDB Logger
+# WeatherHAT Service
 
-This project records temperature and other weather data from a Weather HAT sensor into MongoDB, tracking all-time highs and lows.
+Long-running WeatherHAT sensor service that writes measurements and records to MongoDB. Uses systemd for supervision and keeps the WeatherHAT library state alive for accurate rain readings.
+
+## Prerequisites (Pi)
+
+- Raspberry Pi OS with I2C enabled (Preferences → Raspberry Pi Configuration → Interfaces → I2C → Enable → reboot, or `sudo raspi-config` → Interface Options → I2C).
+- Python 3 with `pip` available.
+- Access to MongoDB (local or remote) and network connectivity to it.
+- Optional but recommended: virtual environment for Python packages.
 
 ## Setup
 
-1. Make sure you have Docker and Docker Compose installed
-2. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+git clone <repo> weatherhat
+cd weatherhat
 
-## Starting the MongoDB Container
+# Create and activate a venv
+python3 -m venv env
+source env/bin/activate
 
-Start the MongoDB container using Docker Compose:
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Configure environment (edit .env in repo root)
+cat > .env <<'EOF'
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=weather_data
+WEATHER_INTERVAL=60
+WEATHER_LOCATION=backyard
+EOF
+```
+
+## Deploy the systemd service (recommended)
+
+The deploy helper sets paths and installs the service under your current user.
 
 ```bash
-docker-compose up -d
+chmod +x deploy_service.sh
+./deploy_service.sh
 ```
 
-This will start MongoDB in the background, accessible at localhost:27017.
+What it does:
+- Verifies `weatherhat` is importable in the active Python.
+- Stops any running Telegraf instance.
+- Renders and installs [systemd/weatherhat.service](systemd/weatherhat.service) with the correct user, paths, and interpreter.
+- Enables and starts the `weatherhat` service.
 
-## Running the Weather Logger
+## Service management
 
-Run the script to start collecting and recording data:
+- Status: `sudo systemctl status weatherhat`
+- Logs (follow): `sudo journalctl -u weatherhat -f`
+- Restart: `sudo systemctl restart weatherhat`
+- Stop: `sudo systemctl stop weatherhat`
+- Disable on boot: `sudo systemctl disable weatherhat`
 
-```bash
-python weatherhat-telegraf.py
-```
+## Troubleshooting
 
-## Environment Variables
+- Missing `/dev/i2c-1`: ensure I2C is enabled and the WeatherHAT is seated. On Bookworm, check `/boot/firmware/config.txt` for `dtparam=i2c_arm=on` and reboot.
+- Mongo unreachable: verify `MONGO_URI` in `.env` and network/firewall settings.
+- Wrong Python environment: activate the venv then rerun [deploy_service.sh](deploy_service.sh) so the service points at the correct interpreter.
 
-You can customize the behavior using environment variables:
+## Data
 
-- `MONGO_URI`: MongoDB connection string (default: mongodb://localhost:27017)
-- `MONGO_DB`: Database name (default: weather_data)
-- `STARTUP_DELAY`: Delay in seconds before connecting to MongoDB (useful when starting containers together)
-
-## Data Structure
-
-The application stores data in two collections:
-
-1. `measurements`: All raw measurements with timestamps
-2. `records`: All-time high and low records for each measurement type
-
-## Viewing Records
-
-You can connect to MongoDB and view your records using:
-
-```bash
-docker exec -it weather-mongodb mongosh weather_data
-```
-
-Then query the records:
-
-```javascript
-db.records.find()  // View all records
-db.records.find({"record_type": "highest"})  // View highest records only
-db.records.find({"record_type": "lowest"})   // View lowest records only
-```
+- MongoDB collections: `measurements` (all readings) and `records` (highs/lows).
