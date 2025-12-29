@@ -57,6 +57,7 @@ class WeatherService:
         self.mongo_client = None
         self.db = None
         self.maintenance_tracker = None
+        self._first_measurement = True
         
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -99,7 +100,9 @@ class WeatherService:
         try:
             # Take sensor readings (with proper rain accumulation)
             # Use single reading since we're running continuously
-            readings = take_readings(self.sensor, num_readings=1, discard_first=False)
+            discard_first = self._first_measurement
+            readings = take_readings(self.sensor, num_readings=1, discard_first=discard_first)
+            self._first_measurement = False
             
             if not readings:
                 print("No readings obtained from sensor", file=sys.stderr)
