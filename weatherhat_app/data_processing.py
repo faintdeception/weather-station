@@ -350,10 +350,10 @@ def setup_retention_policies(db):
             background=True
         )
         
-        # Daily data can stay longer - 365 days
+        # Daily data kept longer for date-record features - 5 years
         db.daily_measurements.create_index(
             [("timestamp_ms", 1)],
-            expireAfterSeconds=31536000,  # 365 days
+            expireAfterSeconds=157680000,  # 5 years
             background=True
         )
         
@@ -369,6 +369,9 @@ def setup_indexes(db):
         db.measurements.create_index([("tags.location", 1), ("timestamp", -1)])
         db.hourly_measurements.create_index([("tags.location", 1), ("timestamp", -1)])
         db.daily_measurements.create_index([("tags.location", 1), ("timestamp", -1)])
+
+        # Index for fast lookup of calendar-date records
+        db.daily_date_records.create_index([("month_day", 1), ("location", 1)])
         
         # Index for trend calculations
         db.measurements.create_index([("timestamp", 1), ("tags.location", 1)])
@@ -560,12 +563,106 @@ def downsample_daily(db):
             
             db.daily_measurements.insert_one(daily_data)
             print(f"Created daily record for {day_start.date()}", file=sys.stderr)
+
+            # Update long-lived calendar-date records for temperature extremes
+            try:
+                update_daily_date_records(db, daily_data)
+            except Exception as e:
+                print(f"Error updating daily date records: {e}", file=sys.stderr)
             
         return len(results)
     except Exception as e:
         print(f"Error in downsample_daily: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return None
+
+
+def update_daily_date_records(db, daily_data):
+    """Maintain highest/lowest temperature ever seen for a given calendar date (month-day).
+
+    Stores a compact, non-TTL collection keyed by month_day (e.g., "01-24").
+    Only temperature is tracked per requirements; values are in UTC.
+    """
+    records = db['daily_date_records']
+
+    # Extract needed fields
+    day_dt = daily_data.get('timestamp_ms')  # datetime with tz
+    if not isinstance(day_dt, datetime):
+        return
+
+    month_day = day_dt.strftime('%m-%d')
+    location = daily_data.get('tags', {}).get('location', 'unknown')
+    temp_fields = daily_data.get('fields', {}).get('temperature', {})
+    day_min = temp_fields.get('min')
+    day_max = temp_fields.get('max')
+
+    if day_min is None and day_max is None:
+        return
+
+    # Build updates if we have new records
+    update_ops = {}
+    set_on_insert = {'month_day': month_day, 'location': location}
+
+    current = records.find_one({'month_day': month_day, 'location': location})
+
+    # Highest temp for this calendar date
+    if day_max is not None:
+        if current is None or 'high' not in current or day_max > current['high']['value']:
+            update_ops['high'] = {
+                'value': day_max,
+                'date': day_dt.strftime('%Y-%m-%d'),
+                'day_timestamp': int(day_dt.timestamp() * 1e9)
+            }
+
+    # Lowest temp for this calendar date
+    if day_min is not None:
+        if current is None or 'low' not in current or day_min < current['low']['value']:
+            update_ops['low'] = {
+                'value': day_min,
+                'date': day_dt.strftime('%Y-%m-%d'),
+                'day_timestamp': int(day_dt.timestamp() * 1e9)
+            }
+
+    if not update_ops and current is not None:
+        return  # No change needed
+
+    update_ops['updated_at'] = datetime.utcnow()
+
+    records.update_one(
+        {'month_day': month_day, 'location': location},
+        {
+            '$set': update_ops,
+            '$setOnInsert': set_on_insert
+        },
+        upsert=True
+    )
+
+
+def backfill_daily_date_records(db):
+    """Backfill calendar-date records from existing daily_measurements.
+
+    Idempotent; safe to run at startup or maintenance. Only temperature min/max is used.
+    """
+    try:
+        cursor = db.daily_measurements.find({}, {
+            'timestamp_ms': 1,
+            'fields.temperature.min': 1,
+            'fields.temperature.max': 1,
+            'tags.location': 1
+        })
+
+        count = 0
+        for doc in cursor:
+            update_daily_date_records(db, {
+                'timestamp_ms': doc.get('timestamp_ms'),
+                'fields': {'temperature': doc.get('fields', {}).get('temperature', {})},
+                'tags': doc.get('tags', {})
+            })
+            count += 1
+
+        print(f"Backfilled daily_date_records from {count} daily_measurements", file=sys.stderr)
+    except Exception as e:
+        print(f"Error backfilling daily date records: {e}", file=sys.stderr)
 
 def get_collection_sizes(db):
     """Get the size of each collection in the database"""

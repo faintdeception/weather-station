@@ -38,7 +38,8 @@ load_env_vars()
 from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, cleanup_sensor
 from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurement, store_measurement, 
                                            update_records, calculate_trends, setup_retention_policies, setup_indexes,
-                                           DateTimeEncoder, get_sampling_config, get_measurement_buffer)
+                                           DateTimeEncoder, get_sampling_config, get_measurement_buffer,
+                                           backfill_daily_date_records)
 from weatherhat_app.reporting import generate_daily_report
 from weatherhat_app.maintenance_tracker import MaintenanceTracker
 
@@ -159,6 +160,9 @@ def run():
           # Set up data retention policies and performance indexes
         setup_retention_policies(db)
         setup_indexes(db)
+
+                # Ensure calendar-date records are populated from existing daily data
+                backfill_daily_date_records(db)
         
         # Create maintenance tracker and check for needed maintenance
         maintenance_tracker = MaintenanceTracker(db)
