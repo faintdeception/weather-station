@@ -328,34 +328,40 @@ def setup_retention_policies(db):
             print("Created daily_measurements collection", file=sys.stderr)
         
         # Set up TTL indexes for each collection with appropriate retention periods
-        
-        # Keep raw measurements for 30 days (much lower than before to save space)
-        db.measurements.create_index(
-            [("timestamp_ms", 1)], 
-            expireAfterSeconds=7776000,  # 90 days
-            background=True
-        )
-        
-        # Keep hourly data for 90 days
-        db.hourly_measurements.create_index(
-            [("timestamp_ms", 1)],
-            expireAfterSeconds=7776000,  # 90 days
-            background=True
-        )
-        
-        # Keep trend data for 180 days
-        db.trends.create_index(
-            [("timestamp_ms", 1)],
-            expireAfterSeconds=15552000,  # 180 days
-            background=True
-        )
-        
+
+        def ensure_ttl_index(collection, field_name, seconds):
+            idx_name = f"{field_name}_1"
+            info = collection.index_information()
+            existing = info.get(idx_name)
+
+            # If index exists with different expireAfterSeconds, drop and recreate
+            if existing and existing.get('expireAfterSeconds') != seconds:
+                try:
+                    collection.drop_index(idx_name)
+                    print(f"Dropped conflicting TTL index {idx_name} on {collection.name}", file=sys.stderr)
+                except Exception as drop_err:
+                    print(f"Warning: could not drop index {idx_name} on {collection.name}: {drop_err}", file=sys.stderr)
+                    # If we can't drop it, bail to avoid repeated failures
+                    return
+
+            collection.create_index(
+                [(field_name, 1)],
+                name=idx_name,
+                expireAfterSeconds=seconds,
+                background=True
+            )
+
+        # Keep raw measurements for ~90 days
+        ensure_ttl_index(db.measurements, "timestamp_ms", 7776000)
+
+        # Keep hourly data for ~90 days
+        ensure_ttl_index(db.hourly_measurements, "timestamp_ms", 7776000)
+
+        # Keep trend data for ~180 days
+        ensure_ttl_index(db.trends, "timestamp_ms", 15552000)
+
         # Daily data kept longer for date-record features - 5 years
-        db.daily_measurements.create_index(
-            [("timestamp_ms", 1)],
-            expireAfterSeconds=157680000,  # 5 years
-            background=True
-        )
+        ensure_ttl_index(db.daily_measurements, "timestamp_ms", 157680000)
         
         print("Set up data retention policies with tiered storage", file=sys.stderr)
     except Exception as e:
