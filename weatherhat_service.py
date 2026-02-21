@@ -52,8 +52,11 @@ DB_NAME = os.environ.get('MONGO_DB', 'weather_data')
 class WeatherService:
     def __init__(self, interval_seconds=60):
         self.interval_seconds = interval_seconds
+        self.sensor_retry_interval = int(os.environ.get('WEATHER_SENSOR_RETRY_INTERVAL', '300'))
         self.running = True
         self.sensor = None
+        self.last_sensor_retry_time = 0
+        self.last_no_sensor_log_time = 0
         self.mongo_client = None
         self.db = None
         self.maintenance_tracker = None
@@ -67,14 +70,28 @@ class WeatherService:
         """Handle shutdown signals gracefully"""
         print(f"\nReceived signal {signum}, shutting down gracefully...", file=sys.stderr)
         self.running = False
+
+    def _initialize_sensor(self, reason="startup"):
+        """Attempt to initialize the WeatherHAT sensor."""
+        print(f"Initializing WeatherHAT sensor ({reason})...", file=sys.stderr)
+        try:
+            self.sensor = initialize_sensor()
+            self._first_measurement = True
+            self.last_sensor_retry_time = time.time()
+            print("WeatherHAT sensor is available", file=sys.stderr)
+            return True
+        except Exception as e:
+            self.sensor = None
+            self.last_sensor_retry_time = time.time()
+            print(
+                f"WeatherHAT sensor unavailable: {e}. Running in degraded mode and retrying every {self.sensor_retry_interval}s.",
+                file=sys.stderr
+            )
+            return False
         
     def initialize(self):
         """Initialize sensor and database connections"""
         try:
-            # Initialize sensor first
-            print("Initializing WeatherHAT sensor...", file=sys.stderr)
-            self.sensor = initialize_sensor()
-            
             # Connect to MongoDB
             print("Connecting to MongoDB...", file=sys.stderr)
             self.mongo_client = connect_to_mongodb(MONGO_URI)
@@ -86,6 +103,9 @@ class WeatherService:
             
             # Initialize maintenance tracker
             self.maintenance_tracker = MaintenanceTracker(self.db)
+
+            # Initialize sensor (non-fatal if unavailable)
+            self._initialize_sensor(reason="startup")
             
             print("Weather service initialized successfully", file=sys.stderr)
             return True
@@ -97,6 +117,17 @@ class WeatherService:
             
     def take_measurement(self):
         """Take a single measurement and store it"""
+        current_time = time.time()
+
+        if not self.sensor and (current_time - self.last_sensor_retry_time >= self.sensor_retry_interval):
+            self._initialize_sensor(reason="retry")
+
+        if not self.sensor:
+            if current_time - self.last_no_sensor_log_time >= self.sensor_retry_interval:
+                print("Sensor unavailable; skipping measurement cycle", file=sys.stderr)
+                self.last_no_sensor_log_time = current_time
+            return
+
         try:
             # Take sensor readings (with proper rain accumulation)
             # Use single reading since we're running continuously

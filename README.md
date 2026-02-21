@@ -27,6 +27,7 @@ cat > .env <<'EOF'
 MONGO_URI=mongodb://localhost:27017
 MONGO_DB=weather_data
 WEATHER_INTERVAL=60
+WEATHER_SENSOR_RETRY_INTERVAL=300
 WEATHER_LOCATION=backyard
 EOF
 ```
@@ -57,6 +58,7 @@ What it does:
 ## Troubleshooting
 
 - Missing `/dev/i2c-1`: ensure I2C is enabled and the WeatherHAT is seated. On Bookworm, check `/boot/firmware/config.txt` for `dtparam=i2c_arm=on` and reboot.
+- Sensor unavailable at startup: service now runs in degraded mode and retries sensor initialization every `WEATHER_SENSOR_RETRY_INTERVAL` seconds.
 - Mongo unreachable: verify `MONGO_URI` in `.env` and network/firewall settings.
 - Wrong Python environment: activate the venv then rerun [deploy_service.sh](deploy_service.sh) so the service points at the correct interpreter.
 
