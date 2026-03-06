@@ -11,6 +11,7 @@ import os
 import pickle
 from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient, ASCENDING, DESCENDING, UpdateOne, InsertOne
+from pymongo.errors import BulkWriteError
 from bson.objectid import ObjectId
 
 # Custom JSON encoder to handle datetime objects and MongoDB ObjectIds
@@ -45,7 +46,8 @@ class MeasurementBuffer:
                 with open(self.cache_file, 'rb') as f:
                     cached_data = pickle.load(f)
                     if isinstance(cached_data, list):
-                        self.buffer.extend(cached_data)
+                        sanitized = [self._sanitize_for_write(item) for item in cached_data]
+                        self.buffer.extend(sanitized)
                         print(f"Loaded {len(cached_data)} cached measurements", file=sys.stderr)
                 # Remove the cache file after successful load
                 os.remove(self.cache_file)
@@ -56,11 +58,21 @@ class MeasurementBuffer:
         """Save buffer to disk in case of failure"""
         try:
             if self.buffer:
+                sanitized = [self._sanitize_for_write(item) for item in self.buffer]
                 with open(self.cache_file, 'wb') as f:
-                    pickle.dump(self.buffer, f)
-                print(f"Saved {len(self.buffer)} measurements to cache", file=sys.stderr)
+                    pickle.dump(sanitized, f)
+                print(f"Saved {len(sanitized)} measurements to cache", file=sys.stderr)
         except Exception as e:
             print(f"Error saving measurement cache: {e}", file=sys.stderr)
+
+    def _sanitize_for_write(self, measurement):
+        """Return a copy of measurement safe for DB writes and cache persistence."""
+        if not isinstance(measurement, dict):
+            return measurement
+
+        sanitized = dict(measurement)
+        sanitized.pop('_id', None)
+        return sanitized
     
     def add(self, measurement):
         """Add a measurement to the buffer"""
@@ -81,15 +93,49 @@ class MeasurementBuffer:
         try:
             if self.db is None:
                 raise ValueError("Database connection not provided")
+
+            buffer_size_before_flush = len(self.buffer)
+            sanitized_buffer = [self._sanitize_for_write(item) for item in self.buffer]
             
             # Use bulk write for efficiency
-            bulk_ops = [InsertOne(item) for item in self.buffer]
-            result = self.db['measurements'].bulk_write(bulk_ops)
-            
-            print(f"Flushed {len(self.buffer)} measurements to database", file=sys.stderr)
+            bulk_ops = [InsertOne(item) for item in sanitized_buffer]
+
+            try:
+                self.db['measurements'].bulk_write(bulk_ops)
+                self.buffer = []
+                print(f"Flushed {buffer_size_before_flush} measurements to database", file=sys.stderr)
+            except BulkWriteError as bulk_error:
+                details = bulk_error.details or {}
+                write_errors = details.get('writeErrors', [])
+                duplicate_indexes = {
+                    err.get('index') for err in write_errors
+                    if err.get('code') == 11000 and isinstance(err.get('index'), int)
+                }
+
+                if duplicate_indexes:
+                    # Drop duplicate entries from the live buffer so they don't poison all future flush attempts.
+                    self.buffer = [
+                        item for idx, item in enumerate(self.buffer)
+                        if idx not in duplicate_indexes
+                    ]
+
+                    print(
+                        f"Skipped {len(duplicate_indexes)} duplicate buffered measurements; "
+                        f"{len(self.buffer)} remaining in buffer",
+                        file=sys.stderr
+                    )
+
+                    # If only duplicates failed, treat as successful flush for this cycle.
+                    non_duplicate_errors = [
+                        err for err in write_errors if err.get('code') != 11000
+                    ]
+                    if not non_duplicate_errors:
+                        self.last_flush_time = time.time()
+                        return True
+
+                raise
             
             # Reset buffer and update flush time
-            self.buffer = []
             self.last_flush_time = time.time()
             
             return True
