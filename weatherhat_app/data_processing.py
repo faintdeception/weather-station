@@ -528,16 +528,119 @@ def downsample_hourly(db):
         traceback.print_exc(file=sys.stderr)
         return None
 
-def downsample_daily(db):
+
+def compute_daily_rain_stats(docs, day_start, day_end, max_gap_seconds=600):
+    """Compute daily rain totals (mm) and max rate (mm/sec) per location/sensor.
+
+    Raw `fields.rain` is treated as a rain rate in mm/sec. Daily rainfall depth is
+    computed by integrating rate over time between consecutive samples.
+    """
+    grouped = {}
+
+    for doc in docs:
+        tags = doc.get("tags", {})
+        location = tags.get("location", "unknown")
+        sensor_type = tags.get("sensor_type", "weatherhat")
+        group_key = (location, sensor_type)
+
+        ts = doc.get("timestamp_ms")
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        rain_rate = float(doc.get("fields", {}).get("rain", 0.0) or 0.0)
+
+        bucket = grouped.setdefault(
+            group_key,
+            {
+                "sum": 0.0,
+                "max": 0.0,
+                "sample_count": 0,
+                "positive_samples": 0,
+                "_prev_ts": None,
+            },
+        )
+
+        prev_ts = bucket["_prev_ts"]
+        bucket["_prev_ts"] = ts
+
+        # Prime state with the first sample for the location/sensor stream.
+        if prev_ts is None:
+            if day_start <= ts < day_end and rain_rate > 0:
+                bucket["positive_samples"] += 1
+                if rain_rate > bucket["max"]:
+                    bucket["max"] = rain_rate
+            continue
+
+        if ts < day_start or ts >= day_end:
+            continue
+
+        bucket["sample_count"] += 1
+        if rain_rate > 0:
+            bucket["positive_samples"] += 1
+            if rain_rate > bucket["max"]:
+                bucket["max"] = rain_rate
+
+        # Clip start to day boundary so pre-day samples only contribute in-day time.
+        interval_start = prev_ts if prev_ts >= day_start else day_start
+        delta_seconds = (ts - interval_start).total_seconds()
+        if delta_seconds <= 0:
+            continue
+
+        # Guardrail for sparse outages or delayed inserts that can inflate totals.
+        effective_delta = min(delta_seconds, max_gap_seconds)
+        bucket["sum"] += max(rain_rate, 0.0) * effective_delta
+
+    # Remove internal state before returning.
+    cleaned = {}
+    for group_key, values in grouped.items():
+        cleaned[group_key] = {
+            "sum": float(values["sum"]),
+            "max": float(values["max"]),
+            "sample_count": int(values["sample_count"]),
+            "positive_samples": int(values["positive_samples"]),
+        }
+    return cleaned
+
+
+def get_daily_rain_stats(db, day_start, day_end, max_gap_seconds=600):
+    """Load raw rain-rate samples and compute per-day rain totals per location/sensor."""
+    lookback_start = day_start - timedelta(hours=1)
+    cursor = db.measurements.find(
+        {
+            "timestamp_ms": {"$gte": lookback_start, "$lt": day_end},
+            "fields.rain": {"$exists": True},
+            "tags.location": {"$exists": True},
+        },
+        {
+            "timestamp_ms": 1,
+            "fields.rain": 1,
+            "tags.location": 1,
+            "tags.sensor_type": 1,
+        },
+    ).sort("timestamp_ms", 1)
+
+    docs = list(cursor)
+    return compute_daily_rain_stats(docs, day_start, day_end, max_gap_seconds=max_gap_seconds)
+
+
+def downsample_daily(db, target_day=None, overwrite=False):
     """Aggregate hourly data to daily records"""
     try:
-        # Get the current time and yesterday
-        now = datetime.now(timezone.utc)
-        yesterday = now - timedelta(days=1)
+        # Default target is yesterday in UTC.
+        if target_day is None:
+            now = datetime.now(timezone.utc)
+            base_day = now - timedelta(days=1)
+        elif isinstance(target_day, datetime):
+            base_day = target_day.astimezone(timezone.utc)
+        else:
+            # Assume date-like object (e.g., datetime.date)
+            base_day = datetime(target_day.year, target_day.month, target_day.day, tzinfo=timezone.utc)
         
         # Get the day timestamp (rounded to the day)
-        day_start = datetime(yesterday.year, yesterday.month, yesterday.day, 
-                            0, 0, 0, tzinfo=timezone.utc)
+        day_start = datetime(base_day.year, base_day.month, base_day.day, 0, 0, 0, tzinfo=timezone.utc)
+        day_end = day_start + timedelta(days=1)
         day_timestamp = int(day_start.timestamp() * 1e9)
         
         # Check if we already have a daily record for this day
@@ -546,9 +649,11 @@ def downsample_daily(db):
             "tags.location": {"$exists": True}
         })
         
-        if existing:
+        if existing and not overwrite:
             print(f"Daily record for {day_start.date()} already exists", file=sys.stderr)
             return None
+
+        rain_stats = get_daily_rain_stats(db, day_start, day_end)
             
         # Find hourly records for the day
         pipeline = [
@@ -556,7 +661,7 @@ def downsample_daily(db):
                 "$match": {
                     "timestamp_ms": {
                         "$gte": day_start,
-                        "$lt": day_start + timedelta(days=1)
+                        "$lt": day_end
                     }
                 }
             },
@@ -584,8 +689,24 @@ def downsample_daily(db):
         
         # Store daily records
         for result in results:
-            if result["hour_count"] < 12:  # Require at least 12 hours of data
+            group_key = (result["_id"].get("location", "unknown"), result["_id"].get("sensor_type", "weatherhat"))
+            rain_for_group = rain_stats.get(
+                group_key,
+                {"sum": 0.0, "max": 0.0, "sample_count": 0, "positive_samples": 0},
+            )
+
+            # Keep the historical data-quality gate, but do not discard rainy days.
+            if result["hour_count"] < 12 and rain_for_group["positive_samples"] <= 0:
                 continue
+
+            if rain_for_group["positive_samples"] > 0 and rain_for_group["sum"] <= 0.0:
+                print(
+                    (
+                        "WARNING: Rainy raw data detected but computed daily rain total is zero "
+                        f"for {day_start.date()} location={group_key[0]} sensor={group_key[1]}"
+                    ),
+                    file=sys.stderr,
+                )
                 
             daily_data = {
                 "timestamp": day_timestamp,
@@ -604,6 +725,13 @@ def downsample_daily(db):
                         "avg": result["avg_wind_speed"],
                         "max": result["max_wind_speed"]
                     },
+                    "rain": {
+                        # Keep legacy shape and add max_rate for explicit rate semantics.
+                        "sum": rain_for_group["sum"],
+                        "max": rain_for_group["max"],
+                        "max_rate": rain_for_group["max"],
+                        "sample_count": rain_for_group["sample_count"]
+                    },
                     "lux": {"avg": result["avg_lux"]},
                     "hour_count": result["hour_count"]
                 },
@@ -612,8 +740,16 @@ def downsample_daily(db):
                     "sensor_type": result["_id"]["sensor_type"]
                 }
             }
-            
-            db.daily_measurements.insert_one(daily_data)
+
+            db.daily_measurements.update_one(
+                {
+                    "day_timestamp": day_timestamp,
+                    "tags.location": result["_id"]["location"],
+                    "tags.sensor_type": result["_id"]["sensor_type"],
+                },
+                {"$set": daily_data},
+                upsert=True,
+            )
             print(f"Created daily record for {day_start.date()}", file=sys.stderr)
 
             # Update long-lived calendar-date records for temperature extremes

@@ -186,7 +186,7 @@ def optimize_database(db):
             if not existing:
                 # Day data doesn't exist, try to create it from hourly data
                 print(f"Creating missing daily record for {day_start.date()}")
-                downsample_daily(db)
+                downsample_daily(db, target_day=day_start)
         
         # 4. Compress old raw measurements by removing some fields
         # For data older than 14 days, we can remove some fields we don't need
