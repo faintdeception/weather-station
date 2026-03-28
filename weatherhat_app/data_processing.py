@@ -433,6 +433,14 @@ def setup_indexes(db):
 
         # Index for fast lookup of calendar-date records
         db.daily_date_records.create_index([("month_day", 1), ("location", 1)])
+
+        # Index for records collection lookups (instantaneous + aggregate record tracking)
+        db.records.create_index([
+            ("field", 1),
+            ("record_type", 1),
+            ("location", 1),
+            ("sensor_type", 1),
+        ])
         
         # Index for trend calculations
         db.measurements.create_index([("timestamp", 1), ("tags.location", 1)])
@@ -766,6 +774,12 @@ def downsample_daily(db, target_day=None, overwrite=False):
                 update_daily_date_records(db, daily_data)
             except Exception as e:
                 print(f"Error updating daily date records: {e}", file=sys.stderr)
+
+            # Track highest daily rain total ever recorded.
+            try:
+                update_highest_daily_rain_record(db, daily_data)
+            except Exception as e:
+                print(f"Error updating highest daily rain record: {e}", file=sys.stderr)
             
         return len(results)
     except Exception as e:
@@ -832,6 +846,66 @@ def update_daily_date_records(db, daily_data):
             '$setOnInsert': set_on_insert
         },
         upsert=True
+    )
+
+
+def update_highest_daily_rain_record(db, daily_data):
+    """Maintain the highest daily rain total ever seen per location/sensor in records.
+
+    Uses daily aggregate totals (fields.rain.sum) so records reflect full-day rainfall,
+    not instantaneous rain-rate samples.
+    """
+    records = db['records']
+
+    day_dt = daily_data.get('timestamp_ms')
+    if not isinstance(day_dt, datetime):
+        return
+
+    tags = daily_data.get('tags', {})
+    location = tags.get('location', 'unknown')
+    sensor_type = tags.get('sensor_type', 'weatherhat')
+
+    rain_fields = daily_data.get('fields', {}).get('rain', {})
+    daily_total = rain_fields.get('sum')
+    if daily_total is None:
+        return
+
+    try:
+        daily_total = float(daily_total)
+    except (TypeError, ValueError):
+        return
+
+    query = {
+        'field': 'rain_daily_total',
+        'record_type': 'highest',
+        'location': location,
+        'sensor_type': sensor_type,
+    }
+
+    existing = records.find_one(query)
+    if existing is not None and daily_total <= float(existing.get('value', float('-inf'))):
+        return
+
+    now_utc = datetime.now(timezone.utc)
+
+    records.update_one(
+        query,
+        {
+            '$set': {
+                'value': daily_total,
+                'timestamp': int(day_dt.timestamp() * 1e9),
+                'date': day_dt.strftime('%Y-%m-%d'),
+                'updated_at': now_utc,
+            },
+            '$setOnInsert': {
+                'field': 'rain_daily_total',
+                'record_type': 'highest',
+                'location': location,
+                'sensor_type': sensor_type,
+                'created_at': now_utc,
+            },
+        },
+        upsert=True,
     )
 
 

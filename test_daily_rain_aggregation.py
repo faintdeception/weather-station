@@ -6,7 +6,11 @@ import sys
 
 sys.modules['weatherhat'] = MagicMock()
 
-from weatherhat_app.data_processing import compute_daily_rain_stats, downsample_daily
+from weatherhat_app.data_processing import (
+    compute_daily_rain_stats,
+    downsample_daily,
+    update_highest_daily_rain_record,
+)
 
 
 class FakeCursor:
@@ -52,8 +56,9 @@ class TestDailyRainAggregation(unittest.TestCase):
         self.assertAlmostEqual(rain["max"], 0.02)
         self.assertEqual(rain["positive_samples"], 2)
 
+    @patch("weatherhat_app.data_processing.update_highest_daily_rain_record")
     @patch("weatherhat_app.data_processing.update_daily_date_records")
-    def test_downsample_daily_writes_rain_shape(self, mock_update_daily_records):
+    def test_downsample_daily_writes_rain_shape(self, mock_update_daily_records, mock_update_rain_record):
         day_start = datetime(2026, 3, 10, 0, 0, 0, tzinfo=timezone.utc)
 
         # Synthetic raw rain-rate samples (mm/sec)
@@ -109,6 +114,53 @@ class TestDailyRainAggregation(unittest.TestCase):
         self.assertGreater(written["fields"]["rain"]["sum"], 0.0)
         self.assertGreaterEqual(written["fields"]["rain"]["max"], 0.02)
         self.assertIn("max_rate", written["fields"]["rain"])
+        mock_update_rain_record.assert_called_once_with(db, written)
+
+    def test_update_highest_daily_rain_record_inserts_when_missing(self):
+        db = MagicMock()
+        records_collection = MagicMock()
+        records_collection.find_one.return_value = None
+        db.__getitem__.return_value = records_collection
+
+        day_start = datetime(2026, 3, 10, 0, 0, 0, tzinfo=timezone.utc)
+        daily_data = {
+            "timestamp_ms": day_start,
+            "fields": {
+                "rain": {
+                    "sum": 12.34,
+                }
+            },
+            "tags": {
+                "location": "backyard",
+                "sensor_type": "weatherhat",
+            },
+        }
+
+        update_highest_daily_rain_record(db, daily_data)
+
+        records_collection.update_one.assert_called_once()
+        query, update_doc = records_collection.update_one.call_args[0][0], records_collection.update_one.call_args[0][1]
+        self.assertEqual(query["field"], "rain_daily_total")
+        self.assertEqual(query["record_type"], "highest")
+        self.assertEqual(update_doc["$set"]["value"], 12.34)
+        self.assertEqual(update_doc["$set"]["date"], "2026-03-10")
+
+    def test_update_highest_daily_rain_record_skips_lower_totals(self):
+        db = MagicMock()
+        records_collection = MagicMock()
+        records_collection.find_one.return_value = {"value": 15.0}
+        db.__getitem__.return_value = records_collection
+
+        day_start = datetime(2026, 3, 10, 0, 0, 0, tzinfo=timezone.utc)
+        daily_data = {
+            "timestamp_ms": day_start,
+            "fields": {"rain": {"sum": 10.0}},
+            "tags": {"location": "backyard", "sensor_type": "weatherhat"},
+        }
+
+        update_highest_daily_rain_record(db, daily_data)
+
+        records_collection.update_one.assert_not_called()
 
 
 if __name__ == "__main__":

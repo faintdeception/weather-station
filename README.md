@@ -65,3 +65,29 @@ What it does:
 ## Data
 
 - MongoDB collections: `measurements` (all readings) and `records` (highs/lows).
+
+## One-Off Backfill Script
+
+Use `backfill_highest_daily_rain_record.py` to backfill the all-time highest daily rain total into `records` from historical `daily_measurements`.
+
+Important:
+- This is a one-off maintenance script, not part of the normal service loop.
+- It is safe by default: without `--apply` it runs in dry-run mode and makes no writes.
+- It is idempotent: it only writes when the historical daily total is greater than the existing record.
+
+Run from repo root:
+
+```bash
+# 1) Preview only (no writes)
+python backfill_highest_daily_rain_record.py
+
+# 2) Apply once after reviewing output
+python backfill_highest_daily_rain_record.py --apply
+```
+
+Optional filters:
+
+```bash
+python backfill_highest_daily_rain_record.py --apply --location backyard
+python backfill_highest_daily_rain_record.py --apply --sensor-type weatherhat
+```
