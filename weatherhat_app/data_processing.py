@@ -377,21 +377,30 @@ def setup_retention_policies(db):
 
         def ensure_ttl_index(collection, field_name, seconds):
             idx_name = f"{field_name}_1"
+            desired_key = [(field_name, 1)]
             info = collection.index_information()
             existing = info.get(idx_name)
 
-            # If index exists with different expireAfterSeconds, drop and recreate
-            if existing and existing.get('expireAfterSeconds') != seconds:
+            if existing:
+                existing_key = existing.get('key')
+                existing_ttl = existing.get('expireAfterSeconds')
+
+                # Index already matches what we need; skip create_index to avoid
+                # provider-specific option conflicts (e.g., Cosmos extra metadata).
+                if existing_key == desired_key and existing_ttl == seconds:
+                    return
+
+                # Existing index differs, so replace it.
                 try:
                     collection.drop_index(idx_name)
                     print(f"Dropped conflicting TTL index {idx_name} on {collection.name}", file=sys.stderr)
                 except Exception as drop_err:
                     print(f"Warning: could not drop index {idx_name} on {collection.name}: {drop_err}", file=sys.stderr)
-                    # If we can't drop it, bail to avoid repeated failures
+                    # If we can't drop it, bail to avoid repeated failures.
                     return
 
             collection.create_index(
-                [(field_name, 1)],
+                desired_key,
                 name=idx_name,
                 expireAfterSeconds=seconds,
                 background=True
