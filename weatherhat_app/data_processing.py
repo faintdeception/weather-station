@@ -218,8 +218,176 @@ def store_measurement(db, measurement):
         traceback.print_exc(file=sys.stderr)
         return None
 
+
+def _get_record_field_value(fields, field):
+    """Return the value used for record tracking for a measurement field.
+
+    Temperature records intentionally use the calibrated ambient
+    `fields.temperature` value. `fields.device_temperature` is stored for
+    diagnostics but should not drive record books.
+    """
+    if field == 'temperature':
+        return fields.get('temperature')
+
+    return fields.get(field)
+
+
+def _timestamp_ns_to_utc_datetime(timestamp_ns):
+    """Convert a nanosecond timestamp to a UTC datetime."""
+    if timestamp_ns is None:
+        return None
+
+    try:
+        return datetime.fromtimestamp(timestamp_ns / 1e9, timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _build_temperature_record_context(day_data=None, measurement_fields=None):
+    """Build contextual metadata for a temperature record."""
+    context = {}
+
+    if day_data:
+        day_temperature = day_data.get('fields', {}).get('temperature', {})
+        day_date = day_data.get('date')
+
+        day_context = {
+            'date': day_date,
+            'avg': day_temperature.get('avg'),
+            'min': day_temperature.get('min'),
+            'max': day_temperature.get('max'),
+        }
+        day_context = {key: value for key, value in day_context.items() if value is not None}
+        if day_context:
+            context['day'] = day_context
+
+    if measurement_fields:
+        conditions = {
+            'humidity': measurement_fields.get('humidity'),
+            'wind_speed': measurement_fields.get('wind_speed'),
+            'lux': measurement_fields.get('lux'),
+        }
+        conditions = {key: value for key, value in conditions.items() if value is not None}
+        if conditions:
+            context['conditions'] = conditions
+
+    return context
+
+
+def _lookup_daily_temperature_summary(db, day_dt, location, sensor_type=None):
+    """Return the daily aggregate document for the given date/location."""
+    if day_dt is None:
+        return None
+
+    day_start = datetime(day_dt.year, day_dt.month, day_dt.day, tzinfo=timezone.utc)
+    day_timestamp = int(day_start.timestamp() * 1e9)
+
+    query = {
+        'day_timestamp': day_timestamp,
+        'tags.location': location,
+    }
+    if sensor_type:
+        query['tags.sensor_type'] = sensor_type
+
+    return db['daily_measurements'].find_one(
+        query,
+        {
+            'date': 1,
+            'fields.temperature.avg': 1,
+            'fields.temperature.min': 1,
+            'fields.temperature.max': 1,
+        },
+    )
+
+
+def _lookup_measurement_fields(db, timestamp_ns, location, sensor_type=None):
+    """Return the raw measurement fields for a record timestamp when available."""
+    if timestamp_ns is None:
+        return None
+
+    query = {
+        'timestamp': timestamp_ns,
+        'tags.location': location,
+    }
+    if sensor_type:
+        query['tags.sensor_type'] = sensor_type
+
+    measurement = db['measurements'].find_one(
+        query,
+        {
+            'fields.humidity': 1,
+            'fields.wind_speed': 1,
+            'fields.lux': 1,
+        },
+    )
+    if measurement is None:
+        return None
+
+    return measurement.get('fields', {})
+
+
+def _enrich_temperature_record(record_doc, db, day_data=None, measurement_fields=None):
+    """Populate context for a stored temperature record document."""
+    if not record_doc or record_doc.get('field') != 'temperature':
+        return False
+
+    location = record_doc.get('location', 'unknown')
+    sensor_type = record_doc.get('sensor_type')
+    timestamp_ns = record_doc.get('timestamp')
+
+    if day_data is None:
+        record_dt = _timestamp_ns_to_utc_datetime(timestamp_ns)
+        day_data = _lookup_daily_temperature_summary(db, record_dt, location, sensor_type=sensor_type)
+
+    if measurement_fields is None:
+        measurement_fields = _lookup_measurement_fields(db, timestamp_ns, location, sensor_type=sensor_type)
+
+    context = _build_temperature_record_context(day_data=day_data, measurement_fields=measurement_fields)
+    if not context:
+        return False
+
+    db['records'].update_one(
+        {'_id': record_doc['_id']},
+        {'$set': {'context': context}},
+    )
+    return True
+
+
+def backfill_temperature_record_context(db):
+    """Backfill contextual metadata on temperature records.
+
+    Context is intentionally temperature-only so consumers can better interpret
+    unusually hot or cold records without changing the record value semantics.
+    """
+    try:
+        records = db['records']
+        cursor = records.find(
+            {'field': 'temperature', 'record_type': {'$in': ['highest', 'lowest']}},
+            {
+                'field': 1,
+                'record_type': 1,
+                'location': 1,
+                'sensor_type': 1,
+                'timestamp': 1,
+            },
+        )
+
+        updated_count = 0
+        for record_doc in cursor:
+            if _enrich_temperature_record(record_doc, db):
+                updated_count += 1
+
+        print(f"Backfilled context for {updated_count} temperature records", file=sys.stderr)
+    except Exception as e:
+        print(f"Error backfilling temperature record context: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+
 def update_records(db, measurement):
-    """Update record-breaking values in MongoDB"""
+    """Update record-breaking values in MongoDB.
+
+    Temperature records are based on the calibrated `temperature` field rather
+    than raw `device_temperature` readings.
+    """
     try:
         records_collection = db['records']
         
@@ -227,13 +395,15 @@ def update_records(db, measurement):
         fields = measurement.get('fields', {})
         timestamp = measurement.get('timestamp')
         location = measurement.get('tags', {}).get('location', 'unknown')
+        sensor_type = measurement.get('tags', {}).get('sensor_type')
+        temperature_context = _build_temperature_record_context(measurement_fields=fields)
         
         # Fields to track records for
         record_fields = ['temperature', 'humidity', 'wind_speed', 'pressure', 'lux']
         
         for field in record_fields:
-            if field in fields:
-                current_value = fields[field]
+            current_value = _get_record_field_value(fields, field)
+            if current_value is not None:
                 
                 # Check for highest record
                 highest_record = records_collection.find_one(
@@ -242,13 +412,17 @@ def update_records(db, measurement):
                 
                 # If no record exists or the current value is higher, update the record
                 if highest_record is None or current_value > highest_record['value']:
+                    set_fields = {
+                        'value': current_value,
+                        'timestamp': timestamp,
+                        'date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1e9))
+                    }
+                    if field == 'temperature' and temperature_context:
+                        set_fields['context'] = temperature_context
+
                     records_collection.update_one(
                         {'field': field, 'location': location, 'record_type': 'highest'},
-                        {'$set': {
-                            'value': current_value,
-                            'timestamp': timestamp,
-                            'date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1e9))
-                        }},
+                        {'$set': set_fields},
                         upsert=True
                     )
                     print(f"New highest record for {field}: {current_value}", file=sys.stderr)
@@ -260,13 +434,17 @@ def update_records(db, measurement):
                 
                 # If no record exists or the current value is lower, update the record
                 if lowest_record is None or current_value < lowest_record['value']:
+                    set_fields = {
+                        'value': current_value,
+                        'timestamp': timestamp,
+                        'date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1e9))
+                    }
+                    if field == 'temperature' and temperature_context:
+                        set_fields['context'] = temperature_context
+
                     records_collection.update_one(
                         {'field': field, 'location': location, 'record_type': 'lowest'},
-                        {'$set': {
-                            'value': current_value,
-                            'timestamp': timestamp,
-                            'date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1e9))
-                        }},
+                        {'$set': set_fields},
                         upsert=True
                     )
                     print(f"New lowest record for {field}: {current_value}", file=sys.stderr)
@@ -780,6 +958,12 @@ def downsample_daily(db, target_day=None, overwrite=False):
                 update_highest_daily_rain_record(db, daily_data)
             except Exception as e:
                 print(f"Error updating highest daily rain record: {e}", file=sys.stderr)
+
+            # Add full-day context to temperature records once the daily summary exists.
+            try:
+                backfill_temperature_record_context(db)
+            except Exception as e:
+                print(f"Error backfilling temperature record context: {e}", file=sys.stderr)
             
         return len(results)
     except Exception as e:
@@ -793,6 +977,8 @@ def update_daily_date_records(db, daily_data):
 
     Stores a compact, non-TTL collection keyed by month_day (e.g., "01-24").
     Only temperature is tracked per requirements; values are in UTC.
+    `daily_data.fields.temperature` is expected to already be the calibrated
+    ambient temperature series, not `device_temperature`.
     """
     records = db['daily_date_records']
 

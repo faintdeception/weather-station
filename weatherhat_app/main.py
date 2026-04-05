@@ -39,7 +39,7 @@ from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calcul
 from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurement, store_measurement, 
                                            update_records, calculate_trends, setup_retention_policies, setup_indexes,
                                            DateTimeEncoder, get_sampling_config, get_measurement_buffer,
-                                           backfill_daily_date_records)
+                                           backfill_daily_date_records, backfill_temperature_record_context)
 from weatherhat_app.reporting import generate_daily_report
 from weatherhat_app.maintenance_tracker import MaintenanceTracker
 
@@ -157,12 +157,13 @@ def run():
         # Connect to MongoDB
         mongo_client = connect_to_mongodb(MONGO_URI)
         db = mongo_client[DB_NAME]
-          # Set up data retention policies and performance indexes
+        # Set up data retention policies and performance indexes
         setup_retention_policies(db)
         setup_indexes(db)
 
-                # Ensure calendar-date records are populated from existing daily data
-                backfill_daily_date_records(db)
+        # Ensure temperature-derived record metadata is populated from existing data.
+        backfill_daily_date_records(db)
+        backfill_temperature_record_context(db)
         
         # Create maintenance tracker and check for needed maintenance
         maintenance_tracker = MaintenanceTracker(db)

@@ -40,7 +40,8 @@ load_env_vars()
 from weatherhat_app.sensor_utils import initialize_sensor, take_readings, calculate_average_readings, cleanup_sensor
 from weatherhat_app.data_processing import (connect_to_mongodb, prepare_measurement, store_measurement, 
                                            update_records, calculate_trends, setup_retention_policies, setup_indexes,
-                                           DateTimeEncoder)
+                                           DateTimeEncoder, backfill_daily_date_records,
+                                           backfill_temperature_record_context)
 from weatherhat_app.reporting import generate_daily_report
 from weatherhat_app.maintenance_tracker import MaintenanceTracker
 
@@ -100,6 +101,10 @@ class WeatherService:
             # Set up data retention policies and performance indexes
             setup_retention_policies(self.db)
             setup_indexes(self.db)
+
+            # Ensure historical temperature record metadata is populated.
+            backfill_daily_date_records(self.db)
+            backfill_temperature_record_context(self.db)
             
             # Initialize maintenance tracker
             self.maintenance_tracker = MaintenanceTracker(self.db)
