@@ -104,6 +104,7 @@ class MeasurementBuffer:
                 self.db['measurements'].bulk_write(bulk_ops)
                 self.buffer = []
                 print(f"Flushed {buffer_size_before_flush} measurements to database", file=sys.stderr)
+                get_deferred_database_task_queue().flush(self.db)
             except BulkWriteError as bulk_error:
                 details = bulk_error.details or {}
                 write_errors = details.get('writeErrors', [])
@@ -146,8 +147,102 @@ class MeasurementBuffer:
             self._save_to_cache()
             return False
 
+
+class DeferredDatabaseTaskQueue:
+    """Persist replayable DB tasks that depend on measurements."""
+
+    def __init__(self, cache_file=None):
+        self.tasks = []
+        self.cache_file = cache_file or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'deferred_db_tasks.pickle'
+        )
+        self._load_from_cache()
+
+    def _load_from_cache(self):
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'rb') as f:
+                    cached_tasks = pickle.load(f)
+                    if isinstance(cached_tasks, list):
+                        self.tasks.extend(cached_tasks)
+                        print(f"Loaded {len(cached_tasks)} deferred DB tasks", file=sys.stderr)
+        except Exception as e:
+            print(f"Error loading deferred DB task cache: {e}", file=sys.stderr)
+
+    def _save_to_cache(self):
+        try:
+            if self.tasks:
+                with open(self.cache_file, 'wb') as f:
+                    pickle.dump(self.tasks, f)
+                print(f"Saved {len(self.tasks)} deferred DB tasks", file=sys.stderr)
+            elif os.path.exists(self.cache_file):
+                os.remove(self.cache_file)
+        except Exception as e:
+            print(f"Error saving deferred DB task cache: {e}", file=sys.stderr)
+
+    def _task_key(self, task):
+        measurement = task.get('measurement', {})
+        tags = measurement.get('tags', {})
+        return (
+            task.get('type'),
+            measurement.get('timestamp'),
+            tags.get('location'),
+            tags.get('sensor_type'),
+        )
+
+    def enqueue(self, task_type, measurement):
+        task = {
+            'type': task_type,
+            'measurement': _sanitize_measurement_for_replay(measurement),
+        }
+
+        task_key = self._task_key(task)
+        if any(self._task_key(existing_task) == task_key for existing_task in self.tasks):
+            return
+
+        self.tasks.append(task)
+        self._save_to_cache()
+
+    def flush(self, db):
+        if not self.tasks:
+            return True
+
+        remaining_tasks = []
+
+        for index, task in enumerate(self.tasks):
+            try:
+                task_type = task.get('type')
+                measurement = task.get('measurement')
+
+                if task_type == 'update_records':
+                    _update_records_impl(db, measurement)
+                elif task_type == 'calculate_trends':
+                    _calculate_trends_impl(db, measurement)
+                else:
+                    raise ValueError(f"Unknown deferred DB task type: {task_type}")
+            except Exception as e:
+                print(f"Error flushing deferred DB task {task}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                remaining_tasks = self.tasks[index:]
+                break
+
+        self.tasks = remaining_tasks
+        self._save_to_cache()
+        return not self.tasks
+
+
+def _sanitize_measurement_for_replay(measurement):
+    if not isinstance(measurement, dict):
+        return measurement
+
+    sanitized = dict(measurement)
+    sanitized.pop('_id', None)
+    return sanitized
+
 # Global measurement buffer
 _measurement_buffer = None
+_deferred_database_task_queue = None
 
 def get_measurement_buffer(db=None, max_size=10, max_age_seconds=300):
     """Get the singleton measurement buffer instance"""
@@ -157,6 +252,14 @@ def get_measurement_buffer(db=None, max_size=10, max_age_seconds=300):
     elif db is not None and _measurement_buffer.db is None:
         _measurement_buffer.db = db
     return _measurement_buffer
+
+
+def get_deferred_database_task_queue(cache_file=None):
+    """Get the singleton deferred DB task queue instance."""
+    global _deferred_database_task_queue
+    if _deferred_database_task_queue is None:
+        _deferred_database_task_queue = DeferredDatabaseTaskQueue(cache_file=cache_file)
+    return _deferred_database_task_queue
 
 def connect_to_mongodb(mongo_uri, max_retries=5, retry_interval=5):
     """Connect to MongoDB with retry logic"""
@@ -382,159 +485,177 @@ def backfill_temperature_record_context(db):
         print(f"Error backfilling temperature record context: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
 
-def update_records(db, measurement):
+def _update_records_impl(db, measurement):
     """Update record-breaking values in MongoDB.
 
     Temperature records are based on the calibrated `temperature` field rather
     than raw `device_temperature` readings.
     """
+    records_collection = db['records']
+
+    # Extract fields from measurement
+    fields = measurement.get('fields', {})
+    timestamp = measurement.get('timestamp')
+    location = measurement.get('tags', {}).get('location', 'unknown')
+    sensor_type = measurement.get('tags', {}).get('sensor_type')
+    temperature_context = _build_temperature_record_context(measurement_fields=fields)
+
+    # Fields to track records for
+    record_fields = ['temperature', 'humidity', 'wind_speed', 'pressure', 'lux']
+
+    for field in record_fields:
+        current_value = _get_record_field_value(fields, field)
+        if current_value is not None:
+
+            # Check for highest record
+            highest_record = records_collection.find_one(
+                {'field': field, 'location': location, 'record_type': 'highest'}
+            )
+
+            # If no record exists or the current value is higher, update the record
+            if highest_record is None or current_value > highest_record['value']:
+                set_fields = {
+                    'value': current_value,
+                    'timestamp': timestamp,
+                    'date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1e9))
+                }
+                if field == 'temperature' and temperature_context:
+                    set_fields['context'] = temperature_context
+
+                records_collection.update_one(
+                    {'field': field, 'location': location, 'record_type': 'highest'},
+                    {'$set': set_fields},
+                    upsert=True
+                )
+                print(f"New highest record for {field}: {current_value}", file=sys.stderr)
+
+            # Check for lowest record
+            lowest_record = records_collection.find_one(
+                {'field': field, 'location': location, 'record_type': 'lowest'}
+            )
+
+            # If no record exists or the current value is lower, update the record
+            if lowest_record is None or current_value < lowest_record['value']:
+                set_fields = {
+                    'value': current_value,
+                    'timestamp': timestamp,
+                    'date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1e9))
+                }
+                if field == 'temperature' and temperature_context:
+                    set_fields['context'] = temperature_context
+
+                records_collection.update_one(
+                    {'field': field, 'location': location, 'record_type': 'lowest'},
+                    {'$set': set_fields},
+                    upsert=True
+                )
+                print(f"New lowest record for {field}: {current_value}", file=sys.stderr)
+
+
+def update_records(db, measurement):
+    """Update record-breaking values in MongoDB.
+
+    If the DB is unavailable, queue the record calculation for replay after
+    measurements have been flushed back to MongoDB.
+    """
     try:
-        records_collection = db['records']
-        
-        # Extract fields from measurement
-        fields = measurement.get('fields', {})
-        timestamp = measurement.get('timestamp')
-        location = measurement.get('tags', {}).get('location', 'unknown')
-        sensor_type = measurement.get('tags', {}).get('sensor_type')
-        temperature_context = _build_temperature_record_context(measurement_fields=fields)
-        
-        # Fields to track records for
-        record_fields = ['temperature', 'humidity', 'wind_speed', 'pressure', 'lux']
-        
-        for field in record_fields:
-            current_value = _get_record_field_value(fields, field)
-            if current_value is not None:
-                
-                # Check for highest record
-                highest_record = records_collection.find_one(
-                    {'field': field, 'location': location, 'record_type': 'highest'}
-                )
-                
-                # If no record exists or the current value is higher, update the record
-                if highest_record is None or current_value > highest_record['value']:
-                    set_fields = {
-                        'value': current_value,
-                        'timestamp': timestamp,
-                        'date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1e9))
-                    }
-                    if field == 'temperature' and temperature_context:
-                        set_fields['context'] = temperature_context
-
-                    records_collection.update_one(
-                        {'field': field, 'location': location, 'record_type': 'highest'},
-                        {'$set': set_fields},
-                        upsert=True
-                    )
-                    print(f"New highest record for {field}: {current_value}", file=sys.stderr)
-                
-                # Check for lowest record
-                lowest_record = records_collection.find_one(
-                    {'field': field, 'location': location, 'record_type': 'lowest'}
-                )
-                
-                # If no record exists or the current value is lower, update the record
-                if lowest_record is None or current_value < lowest_record['value']:
-                    set_fields = {
-                        'value': current_value,
-                        'timestamp': timestamp,
-                        'date': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1e9))
-                    }
-                    if field == 'temperature' and temperature_context:
-                        set_fields['context'] = temperature_context
-
-                    records_collection.update_one(
-                        {'field': field, 'location': location, 'record_type': 'lowest'},
-                        {'$set': set_fields},
-                        upsert=True
-                    )
-                    print(f"New lowest record for {field}: {current_value}", file=sys.stderr)
+        _update_records_impl(db, measurement)
+        return True
     except Exception as e:
         print(f"Error in update_records: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
+        get_deferred_database_task_queue().enqueue('update_records', measurement)
+        return False
+
+def _calculate_trends_impl(db, measurement):
+    """Calculate and store trend data based on recent measurements"""
+    trends_collection = db['trends']
+    measurements_collection = db['measurements']
+
+    # Extract current values and metadata
+    fields = measurement.get('fields', {})
+    timestamp = measurement.get('timestamp')
+    location = measurement.get('tags', {}).get('location', 'unknown')
+    current_time = datetime.fromtimestamp(timestamp/1e9)
+
+    # Time ranges for trend calculations
+    time_ranges = {
+        'hour_1': current_time - timedelta(hours=1),
+        'hour_3': current_time - timedelta(hours=3),
+        'hour_6': current_time - timedelta(hours=6),
+        'hour_12': current_time - timedelta(hours=12),
+        'hour_24': current_time - timedelta(hours=24),
+    }
+
+    # Parameters to analyze
+    trend_parameters = ['temperature', 'pressure', 'humidity', 'wind_speed']
+
+    trends_data = {
+        "timestamp": timestamp,
+        "date": current_time.strftime('%Y-%m-%d %H:%M:%S'),
+        "location": location,
+        "trends": {}
+    }
+
+    # Process each parameter
+    for param in trend_parameters:
+        if param in fields:
+            current_value = fields[param]
+            param_trends = {}
+
+            # Calculate trends for each time range
+            for range_name, start_time in time_ranges.items():
+                # Convert start_time to timestamp in nanoseconds
+                start_timestamp = int(start_time.timestamp() * 1e9)
+
+                # Query for measurements in the time range
+                historical_data = list(measurements_collection.find(
+                    {
+                        'timestamp': {'$gte': start_timestamp, '$lt': timestamp},
+                        'tags.location': location,
+                        f'fields.{param}': {'$exists': True}
+                    },
+                    {f'fields.{param}': 1, 'timestamp': 1}
+                ).sort('timestamp', 1))
+
+                # Only calculate if we have data
+                if historical_data:
+                    # Extract values
+                    values = [doc['fields'][param] for doc in historical_data]
+
+                    # Get first value in the range for calculating change
+                    first_value = values[0] if values else current_value
+
+                    # Calculate metrics
+                    import statistics  # Import here to avoid potential circular imports
+                    param_trends[range_name] = {
+                        "count": len(values),
+                        "min": min(values) if values else current_value,
+                        "max": max(values) if values else current_value,
+                        "avg": statistics.mean(values) if values else current_value,
+                        "change": current_value - first_value,
+                        "change_pct": ((current_value - first_value) / first_value * 100) if first_value != 0 else 0,
+                        "rate_per_hour": (current_value - first_value) / (len(time_ranges) if len(time_ranges) > 0 else 1)
+                    }
+
+            # Store trends for this parameter
+            trends_data["trends"][param] = param_trends
+
+    # Store the trend data
+    trends_collection.insert_one(trends_data)
+    print(f"Stored trend data for {current_time.strftime('%Y-%m-%d %H:%M:%S')}", file=sys.stderr)
+
+    return trends_data
+
 
 def calculate_trends(db, measurement):
-    """Calculate and store trend data based on recent measurements"""
+    """Calculate and store trend data based on recent measurements."""
     try:
-        trends_collection = db['trends']
-        measurements_collection = db['measurements']
-        
-        # Extract current values and metadata
-        fields = measurement.get('fields', {})
-        timestamp = measurement.get('timestamp')
-        location = measurement.get('tags', {}).get('location', 'unknown')
-        current_time = datetime.fromtimestamp(timestamp/1e9)
-        
-        # Time ranges for trend calculations
-        time_ranges = {
-            'hour_1': current_time - timedelta(hours=1),
-            'hour_3': current_time - timedelta(hours=3),
-            'hour_6': current_time - timedelta(hours=6),
-            'hour_12': current_time - timedelta(hours=12),
-            'hour_24': current_time - timedelta(hours=24),
-        }
-        
-        # Parameters to analyze
-        trend_parameters = ['temperature', 'pressure', 'humidity', 'wind_speed']
-        
-        trends_data = {
-            "timestamp": timestamp,
-            "date": current_time.strftime('%Y-%m-%d %H:%M:%S'),
-            "location": location,
-            "trends": {}
-        }
-        
-        # Process each parameter
-        for param in trend_parameters:
-            if param in fields:
-                current_value = fields[param]
-                param_trends = {}
-                
-                # Calculate trends for each time range
-                for range_name, start_time in time_ranges.items():
-                    # Convert start_time to timestamp in nanoseconds
-                    start_timestamp = int(start_time.timestamp() * 1e9)
-                    
-                    # Query for measurements in the time range
-                    historical_data = list(measurements_collection.find(
-                        {
-                            'timestamp': {'$gte': start_timestamp, '$lt': timestamp},
-                            'tags.location': location,
-                            f'fields.{param}': {'$exists': True}
-                        },
-                        {f'fields.{param}': 1, 'timestamp': 1}
-                    ).sort('timestamp', 1))
-                    
-                    # Only calculate if we have data
-                    if historical_data:
-                        # Extract values
-                        values = [doc['fields'][param] for doc in historical_data]
-                        
-                        # Get first value in the range for calculating change
-                        first_value = values[0] if values else current_value
-                        
-                        # Calculate metrics
-                        import statistics  # Import here to avoid potential circular imports
-                        param_trends[range_name] = {
-                            "count": len(values),
-                            "min": min(values) if values else current_value,
-                            "max": max(values) if values else current_value,
-                            "avg": statistics.mean(values) if values else current_value,
-                            "change": current_value - first_value,
-                            "change_pct": ((current_value - first_value) / first_value * 100) if first_value != 0 else 0,
-                            "rate_per_hour": (current_value - first_value) / (len(time_ranges) if len(time_ranges) > 0 else 1)
-                        }
-                
-                # Store trends for this parameter
-                trends_data["trends"][param] = param_trends
-        
-        # Store the trend data
-        trends_collection.insert_one(trends_data)
-        print(f"Stored trend data for {current_time.strftime('%Y-%m-%d %H:%M:%S')}", file=sys.stderr)
-        
-        return trends_data
+        return _calculate_trends_impl(db, measurement)
     except Exception as e:
         print(f"Error in calculate_trends: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
+        get_deferred_database_task_queue().enqueue('calculate_trends', measurement)
         return None
 
 def setup_retention_policies(db):
